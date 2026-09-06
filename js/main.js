@@ -47,11 +47,18 @@
   }
 
   const SERVE_CONTACT_Z = 2.8; // high toss + reach, needed for reliable net clearance
+  const SERVE_START_Z = 1.0; // toss begins near hand height
+  const SERVE_TOSS_DURATION = 0.85; // seconds, up and back down
+  const IDEAL_CONTACT_Z = 1.0; // sweet-spot contact height for a rally shot
+  const TIMING_TOLERANCE_Z = 1.4; // how forgiving the timing window is
+  const SWEET_SPOT_THRESHOLD = 0.82; // timing quality needed for a glowing power shot
 
-  // Each shot button has a power/depth RANGE, not a fixed value -- holding the
-  // button charges through that range (a full hold = max power & max depth),
-  // and releasing fires the shot. Left/right placement comes from wherever
-  // the joystick is tilted at the moment of release.
+  // Each shot button has a power/depth RANGE, not a fixed value -- tapping the
+  // button fires immediately, and how well-timed the tap is (the ball's
+  // height relative to the ideal contact height) determines how far up each
+  // range the shot lands: a perfectly timed tap is a glowing sweet-spot power
+  // shot, a mistimed one is a weaker, shorter shot. Left/right placement
+  // comes from wherever the joystick is tilted at the moment of the tap.
   const SHOT_PRESETS = {
     topspin: { aimYMin: 0.50, aimYMax: 0.95, powerMin: 0.30, powerMax: 0.65, label: 'TOPSPIN', color: '#2fae5c' },
     lob: { aimYMin: 0.50, aimYMax: 0.95, powerMin: 0.00, powerMax: 0.25, label: 'LOB', color: '#3a6fb0' },
@@ -59,9 +66,19 @@
     slice: { aimYMin: 0.05, aimYMax: 0.40, powerMin: 0.15, powerMax: 0.45, label: 'SLICE', color: '#c98a2c' },
   };
   // The serve has its own dedicated button/power range -- no shot-type choice,
-  // just how hard you hit it. Placement comes from the reticle, not aim.
+  // just how well-timed the swing tap is against the toss. Placement comes
+  // from the reticle, not aim.
   const SERVE_PRESET = { powerMin: 0.30, powerMax: 0.92, label: 'SERVE', color: '#d9a441' };
-  const CHARGE_MAX_SEC = 1.1;
+
+  function computeTimingQuality(ballZ) {
+    const diff = Math.abs(ballZ - IDEAL_CONTACT_Z);
+    return Phys.clamp(1 - diff / TIMING_TOLERANCE_Z, 0, 1);
+  }
+
+  function computeServeTimingQuality(tossT, duration) {
+    const phase = Phys.clamp(tossT / duration, 0, 1);
+    return Phys.clamp(1 - Math.abs(phase - 0.5) * 2.2, 0, 1);
+  }
 
   // Wimbledon's famous all-whites, with a colored trim so the two players
   // still read clearly apart at a glance during a fast rally.
@@ -114,6 +131,11 @@
     shotButtons: [],
     serveButton: null,
     elapsed: 0,
+    serveToss: null, // { t, duration } while the player's toss is in the air
+    shake: null, // { t, dur, mag } camera punch on a sweet-spot hit
+    crowdCheer: 0, // 0..1, decays -- drives a crowd reaction pulse
+    shotCallout: null, // { text, t, dur, x, y } "POWER SHOT!"-style callout
+    sweetTrailUntil: 0,
   };
 
   function setBanner(text, sub, dur) {
@@ -139,7 +161,9 @@
 
   function startPoint() {
     resetReadyPositions();
-    cancelShotCharging();
+    G.serveToss = null;
+    G.shake = null;
+    G.shotCallout = null;
     G.serveAttempt = 1;
     G.servePhase = true;
     G.aiReacted = false;
@@ -158,7 +182,7 @@
     const receiveX = Phys.clamp((box.xMin + box.xMax) / 2, COURT.playerMinX + 0.6, COURT.playerMaxX - 0.6);
     if (server === 'player') {
       G.player.teleportTo(standX, -0.5);
-      G.ball.place(standX, -0.5, SERVE_CONTACT_Z);
+      G.ball.place(standX, -0.5, SERVE_START_Z);
       G.reticle.x = (box.xMin + box.xMax) / 2;
       G.reticle.y = box.yMin + (box.yMax - box.yMin) * 0.35;
       G.state = 'serveAimPlayer';
@@ -199,24 +223,42 @@
     RetroAudio.sfx.hit();
   }
 
-  function executePlayerServe(chargeFrac) {
-    const t = Phys.clamp(chargeFrac, 0, 1);
+  // First tap of SERVE: toss the ball up. A second tap (attemptServeSwing)
+  // times the swing against the toss's arc.
+  function beginServeToss() {
+    G.ball.z = SERVE_START_Z;
+    G.serveToss = { t: 0, duration: SERVE_TOSS_DURATION };
+    G.state = 'serveToss';
+  }
+
+  function attemptServeSwing() {
+    if (!G.serveToss) return;
+    const quality = computeServeTimingQuality(G.serveToss.t, G.serveToss.duration);
+    executePlayerServe(quality);
+  }
+
+  function executePlayerServe(timingQuality) {
+    const t = Phys.clamp(timingQuality, 0, 1);
     const power = SERVE_PRESET.powerMin + t * (SERVE_PRESET.powerMax - SERVE_PRESET.powerMin);
     const box = G.serviceBox;
     const margin = 0.5;
-    const tx = Phys.clamp(G.reticle.x, box.xMin - margin, box.xMax + margin);
-    const ty = Phys.clamp(G.reticle.y, box.yMin - margin, box.yMax + margin);
+    // A mistimed toss-swing loses placement accuracy, not just power.
+    const wobble = (1 - t) * 0.9;
+    const tx = Phys.clamp(G.reticle.x + (Math.random() * 2 - 1) * wobble, box.xMin - margin, box.xMax + margin);
+    const ty = Phys.clamp(G.reticle.y + (Math.random() * 2 - 1) * wobble, box.yMin - margin, box.yMax + margin);
     const T = 1.0 - power * 0.28;
     G.ball.hit({ x: G.player.x, y: G.player.y, z: SERVE_CONTACT_Z }, { x: tx, y: ty, z: 0 }, T, 'player');
     G.ball.requireBounceFor = 'ai';
     G.player.triggerServe();
-    RetroAudio.sfx.hit();
+    power > 0.7 ? RetroAudio.sfx.hitPower() : RetroAudio.sfx.hit();
+    if (t >= SWEET_SPOT_THRESHOLD) triggerSweetSpotFX('POWER SERVE!', G.player.x, G.player.y);
+    G.serveToss = null;
     G.state = 'rally';
     G.servePhase = true; // still "serve in flight" until first legal bounce resolves
   }
 
   function handleServeFault(reason) {
-    cancelShotCharging();
+    G.serveToss = null;
     if (G.serveAttempt === 1) {
       G.serveAttempt = 2;
       setBanner('FAULT', reason === 'net' ? 'INTO THE NET' : 'OUT', 1.0);
@@ -236,7 +278,7 @@
   }
 
   function awardPoint(winnerSide) {
-    cancelShotCharging();
+    G.serveToss = null;
     const res = G.match.awardPoint(winnerSide);
     const wonByPlayer = winnerSide === 'player';
     if (res.events.includes('match')) {
@@ -297,18 +339,21 @@
     }
   }
 
-  function attemptPlayerHit(type, chargeFrac) {
+  function attemptPlayerHit(type) {
     if (!G.ball.isHittableBy('player')) return false;
     if (G.ball.requireBounceFor === 'player' && G.ball.bounces < 1) return false;
     const dist = G.ball.distanceTo(G.player.x, G.player.y);
     if (dist > Phys.HIT_RADIUS) return false;
 
     const preset = SHOT_PRESETS[type] || SHOT_PRESETS.flat;
-    const t = Phys.clamp(chargeFrac || 0, 0, 1);
+    // Timing quality comes from how close the ball's height is to the ideal
+    // contact height at the instant of the tap -- swing at the right moment
+    // for a glowing sweet-spot shot, mistime it for something weaker.
+    const t = computeTimingQuality(G.ball.z);
     const power = preset.powerMin + t * (preset.powerMax - preset.powerMin);
     const aimY = preset.aimYMin + t * (preset.aimYMax - preset.aimYMin);
     // Placement (left/right) comes from wherever the joystick is tilted at
-    // the moment the button is released.
+    // the moment of the tap.
     const aimX = G.joystick.pointerId !== null ? Phys.clamp(G.joystick.nx, -1, 1) : 0;
     const target = Phys.pickShotTarget('player', aimX, aimY, power);
     const contactZ = Phys.contactHeight(G.ball.z);
@@ -323,13 +368,33 @@
     G.player.triggerSwing(type, isForehand);
     power > 0.7 ? RetroAudio.sfx.hitPower() : RetroAudio.sfx.hit();
     G.aiReacted = false;
+    const sweet = t >= SWEET_SPOT_THRESHOLD;
+    flashShotButton(type, sweet);
+    if (sweet) triggerSweetSpotFX('POWER SHOT!', G.player.x, G.player.y);
     return true;
   }
 
-  function triggerShotButton(key, chargeFrac) {
+  function triggerShotButton(key) {
     if (G.state === 'rally') {
-      attemptPlayerHit(key, chargeFrac);
+      attemptPlayerHit(key);
     }
+  }
+
+  function flashShotButton(key, sweet) {
+    const b = G.shotButtons.find((sb) => sb.key === key);
+    if (b) {
+      b.flashUntil = G.elapsed + (sweet ? 0.32 : 0.16);
+      b.flashSweet = sweet;
+    }
+  }
+
+  // Bright-arcade payoff for a well-timed hit: a quick camera punch, a crowd
+  // reaction pulse, a floating callout, and a hot ball trail.
+  function triggerSweetSpotFX(label, worldX, worldY) {
+    G.shake = { t: 0, dur: 0.28, mag: 10 };
+    G.crowdCheer = 1;
+    G.shotCallout = { text: label, t: 0, dur: 0.9, x: worldX, y: worldY };
+    G.sweetTrailUntil = G.elapsed + 0.6;
   }
 
   function aiSwing(ai) {
@@ -362,36 +427,30 @@
     return px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h;
   }
 
-  function anyButtonCharging() {
-    return G.shotButtons.some((b) => b.charging) || (G.serveButton && G.serveButton.charging);
-  }
-
-  function startCharging(b, id) {
-    b.pointerId = id;
-    b.charging = true;
-    b.chargeStart = G.elapsed;
-  }
-
   RetroInput.on({
     onDown(id, x, y) {
       RetroAudio.unlock();
-      if (G.state === 'rally' || G.state === 'serveAimPlayer') {
+      if (G.state === 'rally' || G.state === 'serveAimPlayer' || G.state === 'serveToss') {
         const j = G.joystick;
         if (j.pointerId === null && Math.hypot(x - j.baseX, y - j.baseY) <= j.radius * 1.7) {
           j.pointerId = id;
           return;
         }
         // Only the button set for the current phase is live: the serve
-        // button while serving, the four shot buttons once it's in play.
+        // button while serving (toss, then a timed swing), the four shot
+        // buttons once the ball is in play. Shots fire immediately on tap --
+        // there's no hold/charge, timing quality is read at the instant of
+        // the tap.
         if (G.state === 'serveAimPlayer') {
           const b = G.serveButton;
-          if (b && b.pointerId === null && Math.hypot(x - b.x, y - b.y) <= b.r * 1.1) {
-            startCharging(b, id);
-          }
-        } else if (!anyButtonCharging()) {
+          if (b && Math.hypot(x - b.x, y - b.y) <= b.r * 1.1) beginServeToss();
+        } else if (G.state === 'serveToss') {
+          const b = G.serveButton;
+          if (b && Math.hypot(x - b.x, y - b.y) <= b.r * 1.1) attemptServeSwing();
+        } else {
           for (const b of G.shotButtons) {
-            if (b.pointerId === null && Math.hypot(x - b.x, y - b.y) <= b.r * 1.15) {
-              startCharging(b, id);
+            if (Math.hypot(x - b.x, y - b.y) <= b.r * 1.15) {
+              triggerShotButton(b.key);
               return;
             }
           }
@@ -406,25 +465,8 @@
         j.ny = 0;
         return;
       }
-      if (G.serveButton && G.serveButton.pointerId === id) {
-        const b = G.serveButton;
-        const chargeFrac = b.charging ? Phys.clamp((G.elapsed - b.chargeStart) / CHARGE_MAX_SEC, 0, 1) : 0;
-        b.pointerId = null;
-        b.charging = false;
-        if (G.state === 'serveAimPlayer') executePlayerServe(chargeFrac);
-        return;
-      }
-      for (const b of G.shotButtons) {
-        if (b.pointerId === id) {
-          const chargeFrac = b.charging ? Phys.clamp((G.elapsed - b.chargeStart) / CHARGE_MAX_SEC, 0, 1) : 0;
-          b.pointerId = null;
-          b.charging = false;
-          triggerShotButton(b.key, chargeFrac);
-          return;
-        }
-      }
       if (!rec.isTap) return;
-      const inMatch = G.state === 'rally' || G.state === 'serveAimPlayer' || G.state === 'pointEnd' || G.state === 'serveAI';
+      const inMatch = G.state === 'rally' || G.state === 'serveAimPlayer' || G.state === 'serveToss' || G.state === 'pointEnd' || G.state === 'serveAI';
       if (inMatch) {
         if (pointInRect(x, y, PAUSE_BTN)) openPause();
         return;
@@ -432,19 +474,6 @@
       handleMenuTap(x, y);
     },
   });
-
-  // A held button that never gets released cleanly (finger still down when
-  // the point ends) shouldn't leak a stale charge into whatever comes next.
-  function cancelShotCharging() {
-    for (const b of G.shotButtons) {
-      b.charging = false;
-      b.pointerId = null;
-    }
-    if (G.serveButton) {
-      G.serveButton.charging = false;
-      G.serveButton.pointerId = null;
-    }
-  }
 
   function openPause() {
     G.prevState = G.state === 'paused' ? G.prevState : G.state;
@@ -489,9 +518,8 @@
         r: br,
         x: 0,
         y: 0,
-        pointerId: null,
-        charging: false,
-        chargeStart: 0,
+        flashUntil: 0,
+        flashSweet: false,
       }));
     }
     G.shotButtons.forEach((b) => {
@@ -506,7 +534,7 @@
     if (!G.serveButton) {
       G.serveButton = {
         key: 'serve', label: SERVE_PRESET.label, color: SERVE_PRESET.color,
-        r: 0, x: 0, y: 0, pointerId: null, charging: false, chargeStart: 0,
+        r: 0, x: 0, y: 0, flashUntil: 0, flashSweet: false,
       };
     }
     G.serveButton.r = br * 1.55;
@@ -539,13 +567,14 @@
       }
     }
     const active = Math.hypot(j.nx, j.ny) >= 0.08;
-    // The stick keeps moving the player the whole time a shot is charging --
-    // you need to be able to chase/track the ball while building power.
-    // Whatever the stick is tilted at the instant the button is released is
-    // read as the shot's aim direction (see attemptPlayerHit).
+    // Movement is never locked, even mid-swing -- shots fire instantly on tap
+    // now, so there's no more "charging" period to worry about, but you must
+    // still be free to chase/track the ball right up to contact. Whatever the
+    // stick is tilted at the instant of the tap is read as the shot's aim
+    // direction (see attemptPlayerHit).
     if (G.state === 'rally' && G.player) {
       G.player.setMoveInput(active ? j.nx : 0, active ? -j.ny : 0);
-    } else if (G.state === 'serveAimPlayer' && active) {
+    } else if ((G.state === 'serveAimPlayer' || G.state === 'serveToss') && active) {
       const box = G.serviceBox;
       const RETICLE_SPEED = 4.2; // m/s
       G.reticle.x = Phys.clamp(G.reticle.x + j.nx * RETICLE_SPEED * dt, box.xMin - 0.6, box.xMax + 0.6);
@@ -589,6 +618,21 @@
     } else if (G.state === 'serveAimPlayer') {
       G.player.updateAnim(dt, false);
       G.ai.updateAnim(dt, false);
+    } else if (G.state === 'serveToss') {
+      G.player.updateAnim(dt, false);
+      G.ai.updateAnim(dt, false);
+      const st = G.serveToss;
+      if (st) {
+        st.t += dt;
+        const phase = Phys.clamp(st.t / st.duration, 0, 1);
+        G.ball.x = G.player.x;
+        G.ball.y = G.player.y - 0.15;
+        G.ball.z = SERVE_START_Z + (SERVE_CONTACT_Z - SERVE_START_Z) * Math.sin(phase * Math.PI);
+        // The toss must always resolve -- if the player never taps, swing
+        // anyway (with whatever timing quality that leaves) rather than
+        // hanging the point.
+        if (st.t >= st.duration) attemptServeSwing();
+      }
     } else if (G.state === 'pointEnd') {
       G.pointEndTimer += dt;
       G.ball.update(dt, () => {});
@@ -603,6 +647,17 @@
     if (G.banner) {
       G.banner.t += dt;
       if (G.banner.t > G.banner.dur) G.banner = null;
+    }
+    if (G.shake) {
+      G.shake.t += dt;
+      if (G.shake.t >= G.shake.dur) G.shake = null;
+    }
+    if (G.crowdCheer > 0) {
+      G.crowdCheer = Math.max(0, G.crowdCheer - dt * 1.5);
+    }
+    if (G.shotCallout) {
+      G.shotCallout.t += dt;
+      if (G.shotCallout.t > G.shotCallout.dur) G.shotCallout = null;
     }
   }
 
@@ -849,11 +904,12 @@
 
   function drawBall() {
     const b = G.ball;
+    const hotTrail = G.elapsed < G.sweetTrailUntil;
     for (let i = 0; i < b.trail.length; i++) {
       const t = b.trail[i];
       const tp = Court.project(t.x, t.y, t.z);
-      const alpha = (i / b.trail.length) * 0.35;
-      ctx.fillStyle = `rgba(216,230,58,${alpha})`;
+      const alpha = (i / b.trail.length) * (hotTrail ? 0.55 : 0.35);
+      ctx.fillStyle = hotTrail ? `rgba(255,140,40,${alpha})` : `rgba(216,230,58,${alpha})`;
       const r = Math.max(1, tp.scale * Phys.BALL_RADIUS * 1.6);
       ctx.beginPath();
       ctx.arc(tp.x, tp.y, r, 0, Math.PI * 2);
@@ -873,6 +929,19 @@
       ctx.arc(p.x, p.y, r * 0.7, 0.4, 2.4);
       ctx.stroke();
     }
+  }
+
+  function drawShotCallout() {
+    const c = G.shotCallout;
+    if (!c) return;
+    const life = Phys.clamp(c.t / c.dur, 0, 1);
+    const alpha = life > 0.6 ? Phys.clamp((1 - life) / 0.4, 0, 1) : 1;
+    const p = Court.project(c.x, c.y, 2.2 + life * 1.4);
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    const scale = Math.max(2, Math.min(4, Math.floor(logicalW / 260)));
+    Font.drawTextCenteredShadowed(ctx, c.text, p.x, p.y, scale, '#ff9c3c');
+    ctx.restore();
   }
 
   function drawServiceBoxHighlight() {
@@ -907,7 +976,22 @@
   }
 
   function renderMatch() {
-    Court.render(ctx, G.elapsed);
+    // Camera shake/zoom-punch on a sweet-spot hit -- applied only to the
+    // world-space scene, never to the HUD/banner, which stay screen-fixed.
+    ctx.save();
+    if (G.shake) {
+      const decay = 1 - G.shake.t / G.shake.dur;
+      const mag = G.shake.mag * decay * decay;
+      const ang = G.elapsed * 90;
+      const ox = Math.sin(ang) * mag;
+      const oy = Math.cos(ang * 1.3) * mag * 0.6;
+      const zoom = 1 + 0.025 * decay;
+      ctx.translate(logicalW / 2, logicalH / 2);
+      ctx.scale(zoom, zoom);
+      ctx.translate(-logicalW / 2 + ox, -logicalH / 2 + oy);
+    }
+
+    Court.render(ctx, G.elapsed, G.crowdCheer);
     drawServiceBoxHighlight();
 
     const drawables = [
@@ -917,6 +1001,8 @@
     ];
     drawables.sort((a, b) => b.y - a.y);
     drawables.forEach((d) => d.draw());
+    drawShotCallout();
+    ctx.restore();
 
     drawHud();
     drawBanner();
@@ -961,7 +1047,9 @@
     ctx.fillRect(PAUSE_BTN.x + 25, PAUSE_BTN.y + 11, 5, 18);
 
     if (G.state === 'serveAimPlayer') {
-      Font.drawTextCenteredShadowed(ctx, 'JOYSTICK AIMS - HOLD SERVE TO SERVE', logicalW / 2, logicalH - 20, Math.max(1, scale - 1), '#f4f1e6');
+      Font.drawTextCenteredShadowed(ctx, 'JOYSTICK AIMS - TAP SERVE TO TOSS', logicalW / 2, logicalH - 20, Math.max(1, scale - 1), '#f4f1e6');
+    } else if (G.state === 'serveToss') {
+      Font.drawTextCenteredShadowed(ctx, 'TAP SERVE AGAIN AT THE PEAK!', logicalW / 2, logicalH - 20, Math.max(1, scale - 1), '#ffe678');
     } else if (G.state === 'rally') {
       const hint = G.ball.isHittableBy('player') && G.ball.distanceTo(G.player.x, G.player.y) <= Phys.HIT_RADIUS;
       if (hint) {
@@ -974,7 +1062,7 @@
       }
     }
 
-    if (G.state === 'rally' || G.state === 'serveAimPlayer') drawJoystickAndButtons();
+    if (G.state === 'rally' || G.state === 'serveAimPlayer' || G.state === 'serveToss') drawJoystickAndButtons();
   }
 
   function drawJoystickAndButtons() {
@@ -996,43 +1084,69 @@
     ctx.fill();
 
     if (G.state === 'serveAimPlayer') {
-      if (G.serveButton) drawChargeButton(G.serveButton, 2);
+      if (G.serveButton) drawShotButton(G.serveButton, 2);
+    } else if (G.state === 'serveToss') {
+      if (G.serveButton) {
+        drawServeTossGauge(G.serveButton);
+        drawShotButton(G.serveButton, 2);
+      }
     } else {
-      for (const b of G.shotButtons) drawChargeButton(b, 1);
+      for (const b of G.shotButtons) drawShotButton(b, 1);
     }
   }
 
-  function drawChargeButton(b, labelScale) {
-    const chargeT = b.charging ? Phys.clamp((G.elapsed - b.chargeStart) / CHARGE_MAX_SEC, 0, 1) : 0;
-    const pressed = b.pointerId !== null;
-    const r = pressed ? b.r * (1.06 + chargeT * 0.22) : b.r;
-    ctx.fillStyle = pressed ? b.color : 'rgba(6,17,12,0.55)';
+  // Buttons fire immediately on tap now -- this just flashes briefly to
+  // confirm the tap landed, glowing gold for a sweet-spot hit.
+  function drawShotButton(b, labelScale) {
+    const flashing = G.elapsed < (b.flashUntil || 0);
+    const r = flashing ? b.r * (b.flashSweet ? 1.28 : 1.14) : b.r;
+    ctx.fillStyle = flashing ? (b.flashSweet ? '#ffe678' : b.color) : 'rgba(6,17,12,0.55)';
     ctx.beginPath();
     ctx.arc(b.x, b.y, r, 0, Math.PI * 2);
     ctx.fill();
     ctx.strokeStyle = b.color;
     ctx.lineWidth = 3;
     ctx.stroke();
-    Font.drawTextCentered(ctx, b.label, b.x, b.y, labelScale, pressed ? '#0a1a12' : '#f4f1e6');
+    Font.drawTextCentered(ctx, b.label, b.x, b.y, labelScale, flashing ? '#0a1a12' : '#f4f1e6');
 
-    // Power meter: a charge ring that fills clockwise from the top as the
-    // button is held, capping out (and pulsing) once power is maxed.
-    if (b.charging) {
-      const ringR = b.r + 7;
-      ctx.strokeStyle = 'rgba(10,26,18,0.6)';
-      ctx.lineWidth = 5;
+    if (flashing && b.flashSweet) {
+      ctx.strokeStyle = 'rgba(255,230,120,0.85)';
+      ctx.lineWidth = 4;
       ctx.beginPath();
-      ctx.arc(b.x, b.y, ringR, 0, Math.PI * 2);
-      ctx.stroke();
-
-      const full = chargeT >= 0.995;
-      const pulse = full ? 0.75 + 0.25 * Math.sin(G.elapsed * 14) : 1;
-      ctx.strokeStyle = full ? `rgba(255,232,120,${pulse})` : '#f4f1e6';
-      ctx.lineWidth = 5;
-      ctx.beginPath();
-      ctx.arc(b.x, b.y, ringR, -Math.PI / 2, -Math.PI / 2 + chargeT * Math.PI * 2);
+      ctx.arc(b.x, b.y, b.r + 9, 0, Math.PI * 2);
       ctx.stroke();
     }
+  }
+
+  // While the serve toss is in the air, a ring around the SERVE button shows
+  // the toss's arc progress and highlights the sweet-spot timing zone near
+  // its peak -- tap again when the marker crosses the gold band.
+  function drawServeTossGauge(b) {
+    const st = G.serveToss;
+    if (!st) return;
+    const phase = Phys.clamp(st.t / st.duration, 0, 1);
+    const ringR = b.r + 10;
+
+    ctx.strokeStyle = 'rgba(10,26,18,0.6)';
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, ringR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    const zoneCenter = -Math.PI / 2 + Math.PI; // matches phase = 0.5
+    ctx.strokeStyle = 'rgba(255,230,120,0.85)';
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, ringR, zoneCenter - 0.35, zoneCenter + 0.35);
+    ctx.stroke();
+
+    const markerAngle = -Math.PI / 2 + phase * Math.PI * 2;
+    const mx = b.x + Math.cos(markerAngle) * ringR;
+    const my = b.y + Math.sin(markerAngle) * ringR;
+    ctx.fillStyle = '#f4f1e6';
+    ctx.beginPath();
+    ctx.arc(mx, my, 5, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   function drawBanner() {
@@ -1115,18 +1229,21 @@
       '',
       'JOYSTICK (LEFT) MOVES YOU.',
       '',
-      'HOLD A SHOT BUTTON (RIGHT) TO SWING -',
-      'LONGER HOLDS MEAN MORE POWER & DEPTH.',
+      'TAP A SHOT BUTTON (RIGHT) TO SWING -',
+      'TIME IT RIGHT AS THE BALL ARRIVES FOR',
+      'A GLOWING POWER SHOT. MISTIME IT AND',
+      'IT COMES OUT WEAKER & SHORTER.',
+      '',
       'TOPSPIN IS SAFE, FLAT IS FAST, SLICE',
       'IS SHORT, LOB IS HIGH & DEEP.',
       '',
-      'KEEP MOVING WHILE YOU CHARGE - WHERE',
-      'THE STICK POINTS WHEN YOU RELEASE IS',
+      'KEEP MOVING RIGHT UP TO CONTACT - WHERE',
+      'THE STICK POINTS WHEN YOU SWING IS',
       'WHERE THE SHOT GOES.',
       '',
-      'TO SERVE: AIM WITH THE JOYSTICK, THEN',
-      'HOLD & RELEASE SERVE. SHOT BUTTONS',
-      'APPEAR ONCE IT IS IN PLAY.',
+      'TO SERVE: AIM WITH THE JOYSTICK, TAP',
+      'SERVE TO TOSS THE BALL, THEN TAP IT',
+      'AGAIN AT THE PEAK FOR A POWER SERVE.',
       '',
       'WIN BY MAKING THE CPU MISS, NET IT,',
       'OR HIT IT OUT.',

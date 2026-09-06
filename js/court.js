@@ -158,8 +158,9 @@
     ];
   }
 
-  function drawFan(ctx, fan, time) {
-    const bob = Math.sin(time * fan.bobSpeed + fan.phase) * 0.06;
+  function drawFan(ctx, fan, time, cheer) {
+    const c = cheer || 0;
+    const bob = Math.sin(time * fan.bobSpeed * (1 + c * 1.6) + fan.phase) * (0.06 + c * 0.16);
     const p = project(fan.x, fan.y, fan.z + bob);
     if (p.depth < 0.1) return;
     const s = p.scale;
@@ -172,9 +173,25 @@
     ctx.arc(p.x, p.y - bodyH - headR * 0.75, headR, 0, Math.PI * 2);
     ctx.fillStyle = '#e8b98a';
     ctx.fill();
+
+    // Arms shoot up on a crowd-reaction pulse (a sweet-spot hit, big point).
+    if (c > 0.12) {
+      ctx.strokeStyle = fan.color;
+      ctx.lineWidth = Math.max(1, bodyW * 0.22);
+      ctx.lineCap = 'round';
+      const armLift = bodyH * (0.5 + c * 0.7);
+      ctx.beginPath();
+      ctx.moveTo(p.x - bodyW * 0.3, p.y - bodyH * 0.7);
+      ctx.lineTo(p.x - bodyW * 0.55, p.y - bodyH * 0.7 - armLift);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(p.x + bodyW * 0.3, p.y - bodyH * 0.7);
+      ctx.lineTo(p.x + bodyW * 0.55, p.y - bodyH * 0.7 - armLift);
+      ctx.stroke();
+    }
   }
 
-  function drawStandSet(ctx, tiers, time) {
+  function drawStandSet(ctx, tiers, time, cheer) {
     for (const tier of tiers) {
       const quad = polyFromWorld(tierQuadWorld(tier));
       const shade = tier.i % 2 === 0 ? PALETTE.standRiser : PALETTE.standRiserLight;
@@ -187,7 +204,7 @@
     }
     // Fans drawn after all risers so nearer tiers' crowd isn't hidden by a farther tier's fill.
     for (const tier of tiers) {
-      for (const fan of tier.fans) drawFan(ctx, fan, time);
+      for (const fan of tier.fans) drawFan(ctx, fan, time, cheer);
     }
   }
 
@@ -216,10 +233,10 @@
     ctx.fillRect(top.x - headW / 2, top.y - headW * 0.25, headW, headW * 0.5);
   }
 
-  function drawStadium(ctx, time) {
-    drawStandSet(ctx, STANDS.left, time);
-    drawStandSet(ctx, STANDS.right, time);
-    drawStandSet(ctx, STANDS.far, time);
+  function drawStadium(ctx, time, cheer) {
+    drawStandSet(ctx, STANDS.left, time, cheer);
+    drawStandSet(ctx, STANDS.right, time, cheer);
+    drawStandSet(ctx, STANDS.far, time, cheer);
     drawBackWall(ctx);
     drawFloodlight(ctx, -5.5, -2.5);
     drawFloodlight(ctx, COURT.W + 5.5, -2.5);
@@ -409,9 +426,9 @@
     ctx.fill();
   }
 
-  function render(ctx, time) {
+  function render(ctx, time, cheer) {
     drawBackground(ctx);
-    drawStadium(ctx, time || 0);
+    drawStadium(ctx, time || 0, cheer || 0);
     drawCourtSurface(ctx);
     drawLines(ctx);
     drawNet(ctx);
