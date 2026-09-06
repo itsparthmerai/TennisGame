@@ -48,6 +48,15 @@
 
   const SERVE_CONTACT_Z = 2.8; // high toss + reach, needed for reliable net clearance
 
+  // Each shot button maps to a fixed (depth, power) preset; left/right placement
+  // comes from the joystick's current horizontal tilt at the moment of the swing.
+  const SHOT_PRESETS = {
+    topspin: { aimY: 0.85, power: 0.50, label: 'TOPSPIN', color: '#2fae5c' },
+    lob: { aimY: 0.95, power: 0.02, label: 'LOB', color: '#3a6fb0' },
+    flat: { aimY: 0.75, power: 0.80, label: 'FLAT', color: '#a3341c' },
+    slice: { aimY: 0.15, power: 0.20, label: 'SLICE', color: '#c98a2c' },
+  };
+
   // ---------- Service box geometry ----------
   function getServiceBoxTarget(server, court) {
     const halfNear = { yMin: COURT.NET_Y - COURT.SERVICE_LINE_FROM_NET, yMax: COURT.NET_Y };
@@ -88,6 +97,8 @@
     buttons: [],
     lastPointEvent: null,
     frame: 0,
+    joystick: { pointerId: null, nx: 0, ny: 0, baseX: 0, baseY: 0, radius: 60, knobRadius: 28 },
+    shotButtons: [],
   };
 
   function setBanner(text, sub, dur) {
@@ -168,7 +179,7 @@
     RetroAudio.sfx.hit();
   }
 
-  function executePlayerServe(aimX, aimY, power) {
+  function executePlayerServe(power) {
     const box = G.serviceBox;
     const margin = 0.5;
     const tx = Phys.clamp(G.reticle.x, box.xMin - margin, box.xMax + margin);
@@ -262,23 +273,17 @@
     }
   }
 
-  function attemptPlayerHit(gesture) {
+  function attemptPlayerHit(type) {
     if (!G.ball.isHittableBy('player')) return false;
     if (G.ball.requireBounceFor === 'player' && G.ball.bounces < 1) return false;
     const dist = G.ball.distanceTo(G.player.x, G.player.y);
     if (dist > Phys.HIT_RADIUS) return false;
 
-    let aimX, aimY, power;
-    if (gesture.isSwipe) {
-      aimX = Phys.clamp(gesture.totalDx / 240, -1, 1);
-      aimY = Phys.clamp(-gesture.totalDy / 200, -0.3, 1.3);
-      power = Phys.clamp(gesture.speed / 1.6, 0, 1);
-    } else {
-      aimX = Phys.clamp((G.player.x - COURT.W / 2) / (COURT.W / 2) * -0.3, -1, 1);
-      aimY = 0.55;
-      power = 0.32;
-    }
-    const target = Phys.pickShotTarget('player', aimX, Math.max(aimY, 0), power);
+    const preset = SHOT_PRESETS[type] || SHOT_PRESETS.flat;
+    // Placement (left/right) comes from however far the joystick is currently
+    // tilted -- moving toward a corner naturally aims the shot that way.
+    const aimX = G.joystick.pointerId !== null ? Phys.clamp(G.joystick.nx, -1, 1) : 0;
+    const target = Phys.pickShotTarget('player', aimX, preset.aimY, preset.power);
     const contactZ = Phys.contactHeight(G.ball.z);
     G.ball.hit(
       { x: G.player.x, y: G.player.y, z: contactZ },
@@ -287,10 +292,19 @@
       'player',
       aimX * 0.5
     );
-    G.player.triggerSwing(power > 0.7 ? 'power' : 'normal');
-    power > 0.7 ? RetroAudio.sfx.hitPower() : RetroAudio.sfx.hit();
+    G.player.triggerSwing(preset.power > 0.7 ? 'power' : 'normal');
+    preset.power > 0.7 ? RetroAudio.sfx.hitPower() : RetroAudio.sfx.hit();
     G.aiReacted = false;
     return true;
+  }
+
+  function triggerShotButton(key) {
+    if (G.state === 'rally') {
+      attemptPlayerHit(key);
+    } else if (G.state === 'serveAimPlayer') {
+      const preset = SHOT_PRESETS[key] || SHOT_PRESETS.flat;
+      executePlayerServe(preset.power);
+    }
   }
 
   function aiSwing(ai) {
@@ -319,35 +333,44 @@
   }
 
   RetroInput.on({
-    onDown() { RetroAudio.unlock(); },
-    onMove(p) {
-      if (G.state === 'rally') {
-        const sens = COURT.W / (logicalW * 0.72);
-        G.player.moveBy(p.dx * sens, -p.dy * sens * 0.85);
-      } else if (G.state === 'serveAimPlayer') {
-        const box = G.serviceBox;
-        const sens = (box.xMax - box.xMin) / (logicalW * 0.28);
-        G.reticle.x = Phys.clamp(G.reticle.x + p.dx * sens, box.xMin - 0.6, box.xMax + 0.6);
-        G.reticle.y = Phys.clamp(G.reticle.y - p.dy * sens * 0.9, box.yMin - 0.6, box.yMax + 0.6);
+    onDown(id, x, y) {
+      RetroAudio.unlock();
+      if (G.state === 'rally' || G.state === 'serveAimPlayer') {
+        const j = G.joystick;
+        if (j.pointerId === null && Math.hypot(x - j.baseX, y - j.baseY) <= j.radius * 1.7) {
+          j.pointerId = id;
+          return;
+        }
+        for (const b of G.shotButtons) {
+          if (b.pointerId === null && Math.hypot(x - b.x, y - b.y) <= b.r * 1.15) {
+            b.pointerId = id;
+            triggerShotButton(b.key);
+            return;
+          }
+        }
       }
     },
-    onUp(gesture) {
+    onUp(id, x, y, rec) {
+      const j = G.joystick;
+      if (j.pointerId === id) {
+        j.pointerId = null;
+        j.nx = 0;
+        j.ny = 0;
+        return;
+      }
+      for (const b of G.shotButtons) {
+        if (b.pointerId === id) {
+          b.pointerId = null;
+          return;
+        }
+      }
+      if (!rec.isTap) return;
       const inMatch = G.state === 'rally' || G.state === 'serveAimPlayer' || G.state === 'pointEnd' || G.state === 'serveAI';
-      if (inMatch && pointInRect(gesture.x, gesture.y, PAUSE_BTN)) {
-        openPause();
+      if (inMatch) {
+        if (pointInRect(x, y, PAUSE_BTN)) openPause();
         return;
       }
-      if (G.state === 'rally') {
-        attemptPlayerHit(gesture);
-        return;
-      }
-      if (G.state === 'serveAimPlayer') {
-        let aimPower = 0.4;
-        if (gesture.isSwipe) aimPower = Phys.clamp(gesture.speed / 1.4, 0, 1);
-        executePlayerServe(0, 0, aimPower);
-        return;
-      }
-      handleMenuTap(gesture);
+      handleMenuTap(x, y);
     },
   });
 
@@ -357,14 +380,86 @@
   }
 
   // ---------- Menu system ----------
-  function handleMenuTap(gesture) {
-    if (!gesture.isTap && !gesture.isSwipe) return;
+  function handleMenuTap(x, y) {
     for (const b of G.buttons) {
-      if (pointInRect(gesture.x, gesture.y, b)) {
+      if (pointInRect(x, y, b)) {
         RetroAudio.sfx.uiConfirm();
         b.action();
         return;
       }
+    }
+  }
+
+  // ---------- Joystick + shot-button layout ----------
+  function computeControlLayout() {
+    const j = G.joystick;
+    j.radius = Phys.clamp(Math.min(logicalW, logicalH) * 0.11, 44, 72);
+    j.knobRadius = j.radius * 0.46;
+    j.baseX = j.radius + 30;
+    j.baseY = logicalH - j.radius - 26;
+
+    const br = Phys.clamp(Math.min(logicalW, logicalH) * 0.075, 28, 44);
+    const dr = br * 1.9;
+    const cx = logicalW - dr - br - 22;
+    const cy = logicalH - dr - br - 22;
+    const defs = [
+      { key: 'topspin' },
+      { key: 'lob' },
+      { key: 'flat' },
+      { key: 'slice' },
+    ];
+    const offsets = { topspin: [0, -dr], lob: [dr, 0], flat: [0, dr], slice: [-dr, 0] };
+    if (G.shotButtons.length !== defs.length) {
+      G.shotButtons = defs.map((d) => ({
+        key: d.key,
+        label: SHOT_PRESETS[d.key].label,
+        color: SHOT_PRESETS[d.key].color,
+        r: br,
+        x: 0,
+        y: 0,
+        pointerId: null,
+      }));
+    }
+    G.shotButtons.forEach((b) => {
+      b.r = br;
+      b.x = cx + offsets[b.key][0];
+      b.y = cy + offsets[b.key][1];
+    });
+  }
+
+  function sampleJoystick(dt) {
+    const j = G.joystick;
+    if (j.pointerId === null) {
+      j.nx = 0;
+      j.ny = 0;
+      return;
+    }
+    const p = RetroInput.pointers.get(j.pointerId);
+    if (!p) {
+      j.pointerId = null;
+      j.nx = 0;
+      j.ny = 0;
+      return;
+    }
+    const dx = p.x - j.baseX, dy = p.y - j.baseY;
+    const mag = Math.hypot(dx, dy);
+    if (mag < 1) {
+      j.nx = 0;
+      j.ny = 0;
+    } else {
+      const cl = Math.min(mag, j.radius);
+      j.nx = (dx / mag) * (cl / j.radius);
+      j.ny = (dy / mag) * (cl / j.radius);
+    }
+    if (Math.hypot(j.nx, j.ny) < 0.08) return;
+    if (G.state === 'rally') {
+      const MOVE_SPEED = 6.0; // m/s, player top running speed
+      G.player.moveBy(j.nx * MOVE_SPEED * dt, -j.ny * MOVE_SPEED * dt);
+    } else if (G.state === 'serveAimPlayer') {
+      const box = G.serviceBox;
+      const RETICLE_SPEED = 4.2; // m/s
+      G.reticle.x = Phys.clamp(G.reticle.x + j.nx * RETICLE_SPEED * dt, box.xMin - 0.6, box.xMax + 0.6);
+      G.reticle.y = Phys.clamp(G.reticle.y - j.ny * RETICLE_SPEED * dt, box.yMin - 0.6, box.yMax + 0.6);
     }
   }
 
@@ -375,6 +470,8 @@
   // ---------- Update ----------
   function update(dt) {
     G.frame++;
+    computeControlLayout();
+    sampleJoystick(dt);
     if (G.state === 'rally') {
       G.ball.update(dt, ballEvent);
       G.player.update(dt);
@@ -604,7 +701,7 @@
     ctx.fillRect(PAUSE_BTN.x + 25, PAUSE_BTN.y + 11, 5, 18);
 
     if (G.state === 'serveAimPlayer') {
-      Font.drawTextCenteredShadowed(ctx, 'DRAG TO AIM • TAP TO SERVE', logicalW / 2, logicalH - 26, Math.max(1, scale - 1), '#f4f1e6');
+      Font.drawTextCenteredShadowed(ctx, 'JOYSTICK AIMS - BUTTON SERVES', logicalW / 2, logicalH - 20, Math.max(1, scale - 1), '#f4f1e6');
     } else if (G.state === 'rally') {
       const hint = G.ball.isHittableBy('player') && G.ball.distanceTo(G.player.x, G.player.y) <= Phys.HIT_RADIUS;
       if (hint) {
@@ -615,6 +712,40 @@
         ctx.arc(p.x, p.y, Math.max(18, p.scale * Phys.HIT_RADIUS * 0.5), 0, Math.PI * 2);
         ctx.stroke();
       }
+    }
+
+    if (G.state === 'rally' || G.state === 'serveAimPlayer') drawJoystickAndButtons();
+  }
+
+  function drawJoystickAndButtons() {
+    const j = G.joystick;
+    const knobX = j.baseX + j.nx * j.radius;
+    const knobY = j.baseY + j.ny * j.radius;
+
+    ctx.fillStyle = 'rgba(6,17,12,0.45)';
+    ctx.beginPath();
+    ctx.arc(j.baseX, j.baseY, j.radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(244,241,230,0.55)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.fillStyle = j.pointerId !== null ? 'rgba(244,241,230,0.9)' : 'rgba(244,241,230,0.6)';
+    ctx.beginPath();
+    ctx.arc(knobX, knobY, j.knobRadius, 0, Math.PI * 2);
+    ctx.fill();
+
+    for (const b of G.shotButtons) {
+      const pressed = b.pointerId !== null;
+      const r = pressed ? b.r * 1.08 : b.r;
+      ctx.fillStyle = pressed ? b.color : 'rgba(6,17,12,0.55)';
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = b.color;
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      Font.drawTextCentered(ctx, b.label, b.x, b.y, 1, pressed ? '#0a1a12' : '#f4f1e6');
     }
   }
 
@@ -696,18 +827,21 @@
     const lines = [
       'HOW TO PLAY',
       '',
-      'DRAG ANYWHERE TO MOVE YOUR PLAYER',
-      'AROUND YOUR SIDE OF THE COURT.',
+      'USE THE JOYSTICK (BOTTOM LEFT) TO',
+      'MOVE YOUR PLAYER AROUND THE COURT.',
       '',
-      'SWIPE AS THE BALL ARRIVES TO SWING -',
-      'DIRECTION AIMS THE SHOT, SWIPE UP',
-      'FOR DEPTH, DOWN FOR SHORT.',
-      'FASTER SWIPES HIT HARDER & FLATTER.',
+      'TAP A SHOT BUTTON (BOTTOM RIGHT) TO',
+      'SWING WHEN THE BALL IS IN RANGE -',
+      'TOPSPIN IS A SAFE DEEP DRIVE, FLAT IS',
+      'FAST & AGGRESSIVE, SLICE IS SHORT &',
+      'LOW, LOB ARCS DEEP OVER THE CPU.',
       '',
-      'A QUICK TAP PLAYS A SAFE SHOT.',
+      'TILT THE JOYSTICK LEFT OR RIGHT AS',
+      'YOU SWING TO AIM YOUR SHOT.',
       '',
-      'TO SERVE: DRAG THE RETICLE INSIDE',
-      'THE HIGHLIGHTED BOX, THEN TAP.',
+      'TO SERVE: USE THE JOYSTICK TO AIM',
+      'THE RETICLE, THEN TAP ANY SHOT',
+      'BUTTON TO SERVE.',
       '',
       'WIN POINTS BY MAKING THE CPU MISS,',
       'HIT THE NET, OR HIT THE BALL OUT.',

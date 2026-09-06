@@ -1,23 +1,19 @@
-// Low-level pointer/touch tracking shared by menus and gameplay. Emits
-// down/move/up with logical canvas coordinates + a classified gesture
-// (tap vs swipe, with direction/speed) on release.
+// Multi-touch pointer tracking shared by menus and gameplay. Keeps every
+// active pointer (by id) with its live + start position so callers can
+// implement a persistent joystick (read live position each frame) and
+// discrete buttons/menu taps (classified on release) at the same time.
 (function (global) {
   'use strict';
 
   const TAP_MAX_DIST = 14; // px
   const TAP_MAX_DURATION = 320; // ms
-  const SWIPE_MIN_SPEED = 0.35; // px/ms measured over the recent window
-  const SAMPLE_WINDOW_MS = 130;
 
   class InputTracker {
     constructor() {
       this.canvas = null;
       this.getLogicalSize = () => ({ width: 960, height: 540 });
-      this.handlers = { onDown: null, onMove: null, onUp: null };
-      this.activePointerId = null;
-      this.samples = [];
-      this.startX = 0; this.startY = 0; this.startT = 0;
-      this.lastX = 0; this.lastY = 0;
+      this.handlers = { onDown: null, onUp: null };
+      this.pointers = new Map(); // id -> { x, y, startX, startY, startT }
 
       this._onDown = this._onDown.bind(this);
       this._onMove = this._onMove.bind(this);
@@ -61,56 +57,34 @@
     }
 
     _onDown(e) {
-      if (this.activePointerId !== null) return; // single-touch gameplay
       e.preventDefault();
-      this.activePointerId = e.pointerId;
-      try { this.canvas.setPointerCapture(e.pointerId); } catch (err) { /* noop */ }
       const p = this._toLogical(e.clientX, e.clientY);
       const t = performance.now();
-      this.startX = p.x; this.startY = p.y; this.startT = t;
-      this.lastX = p.x; this.lastY = p.y;
-      this.samples = [{ x: p.x, y: p.y, t }];
-      if (this.handlers.onDown) this.handlers.onDown({ x: p.x, y: p.y });
+      const rec = { x: p.x, y: p.y, startX: p.x, startY: p.y, startT: t };
+      this.pointers.set(e.pointerId, rec);
+      try { this.canvas.setPointerCapture(e.pointerId); } catch (err) { /* noop */ }
+      if (this.handlers.onDown) this.handlers.onDown(e.pointerId, p.x, p.y);
     }
 
     _onMove(e) {
-      if (e.pointerId !== this.activePointerId) return;
+      const rec = this.pointers.get(e.pointerId);
+      if (!rec) return;
       e.preventDefault();
       const p = this._toLogical(e.clientX, e.clientY);
-      const t = performance.now();
-      const dx = p.x - this.lastX, dy = p.y - this.lastY;
-      this.lastX = p.x; this.lastY = p.y;
-      this.samples.push({ x: p.x, y: p.y, t });
-      while (this.samples.length > 1 && t - this.samples[0].t > SAMPLE_WINDOW_MS) this.samples.shift();
-      if (this.handlers.onMove) this.handlers.onMove({ x: p.x, y: p.y, dx, dy });
+      rec.x = p.x;
+      rec.y = p.y;
     }
 
     _onUp(e) {
-      if (e.pointerId !== this.activePointerId) return;
+      const rec = this.pointers.get(e.pointerId);
+      if (!rec) return;
       e.preventDefault();
       const p = this._toLogical(e.clientX, e.clientY);
-      const t = performance.now();
-      const totalDx = p.x - this.startX;
-      const totalDy = p.y - this.startY;
-      const duration = t - this.startT;
-
-      const win = this.samples.filter((s) => t - s.t <= SAMPLE_WINDOW_MS);
-      const ref = win.length ? win[0] : { x: p.x, y: p.y, t: t - 1 };
-      const dtWin = Math.max(1, t - ref.t);
-      const vx = (p.x - ref.x) / dtWin;
-      const vy = (p.y - ref.y) / dtWin;
-      const speed = Math.hypot(vx, vy);
-
-      const dist = Math.hypot(totalDx, totalDy);
+      this.pointers.delete(e.pointerId);
+      const dist = Math.hypot(p.x - rec.startX, p.y - rec.startY);
+      const duration = performance.now() - rec.startT;
       const isTap = dist < TAP_MAX_DIST && duration < TAP_MAX_DURATION;
-      const isSwipe = speed >= SWIPE_MIN_SPEED && !isTap;
-
-      this.activePointerId = null;
-      if (this.handlers.onUp) {
-        this.handlers.onUp({
-          x: p.x, y: p.y, totalDx, totalDy, duration, vx, vy, speed, isTap, isSwipe,
-        });
-      }
+      if (this.handlers.onUp) this.handlers.onUp(e.pointerId, p.x, p.y, { ...rec, isTap });
     }
   }
 
