@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>Retro Court Tennis</title>
+<meta name="description" content="Offline retro-arcade tennis for phone and iPad. Swipe to move and aim, tap to swing." />
+<meta name="theme-color" content="#0e3a2b" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="RetroTennis" />
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="icon" href="icons/icon-192.png" />
+<link rel="apple-touch-icon" href="icons/icon-180.png" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="stage">
+    <canvas id="game" aria-label="Retro Court Tennis game canvas"></canvas>
+    <div id="scanlines" aria-hidden="true"></div>
+    <div id="rotate-hint" aria-hidden="true">
+      <div class="rotate-icon">&#8635;</div>
+      <div>Rotate to landscape</div>
+    </div>
+  </div>
+  <script src="js/font.js"></script>
+  <script src="js/audio.js"></script>
+  <script src="js/court.js"></script>
+  <script src="js/scoring.js"></script>
+  <script src="js/entities.js"></script>
+  <script src="js/input.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
