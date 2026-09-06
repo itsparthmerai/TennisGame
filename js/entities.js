@@ -164,6 +164,20 @@
   }
 
   // ---------- Characters ----------
+  const SWING_DURATION = 0.5; // groundstroke, seconds
+  const SERVE_SWING_DURATION = 0.62;
+
+  // Canonical swing shapes for a left-to-right sweep (screen-space degrees,
+  // 0=right/90=up/180=left/270=down). Mirrored at draw time for the other
+  // sweep direction. Each shot type gets its own backswing/finish shape.
+  const SWING_SHAPES = {
+    flat: { back: 185, contact: 355, follow: 40 },
+    topspin: { back: 205, contact: 355, follow: 78 },
+    slice: { back: 160, contact: 350, follow: 12 },
+    lob: { back: 210, contact: 350, follow: 95 },
+    serve: { back: 255, contact: 97, follow: 15 },
+  };
+
   class Actor {
     constructor(side) {
       this.side = side;
@@ -171,11 +185,15 @@
       this.y = side === 'player' ? COURT.playerMaxY - 2.5 : COURT.aiMinY + 2.5;
       this.renderX = this.x;
       this.renderY = this.y;
-      this.facing = side === 'player' ? 1 : -1; // cosmetic
+      this.vx = 0;
+      this.vy = 0;
+      this.facing = side === 'player' ? 1 : -1; // dominant (racket) shoulder side, cosmetic
       this.anim = 'idle';
       this.animTimer = 0;
       this.swingTimer = 0;
-      this.speed = 0;
+      this.swingDuration = SWING_DURATION;
+      this.swingType = 'flat';
+      this.isForehand = true;
     }
 
     boundsX() { return [COURT.playerMinX, COURT.playerMaxX]; }
@@ -188,10 +206,28 @@
       this.y = clamp(this.y, minY, maxY);
     }
 
-    triggerSwing(kind) {
-      this.anim = kind === 'power' ? 'swingPower' : 'swing';
+    triggerSwing(shotType, isForehand) {
+      this.anim = 'swing';
+      this.swingType = SWING_SHAPES[shotType] ? shotType : 'flat';
+      this.isForehand = isForehand !== false;
       this.animTimer = 0;
-      this.swingTimer = 0.32;
+      this.swingDuration = SWING_DURATION;
+      this.swingTimer = SWING_DURATION;
+    }
+
+    triggerServe() {
+      this.anim = 'swing';
+      this.swingType = 'serve';
+      this.isForehand = true;
+      this.animTimer = 0;
+      this.swingDuration = SERVE_SWING_DURATION;
+      this.swingTimer = SERVE_SWING_DURATION;
+    }
+
+    teleportTo(x, y) {
+      this.x = x; this.y = y;
+      this.renderX = x; this.renderY = y;
+      this.vx = 0; this.vy = 0;
     }
 
     updateAnim(dt, moving) {
@@ -202,7 +238,7 @@
       } else {
         this.anim = moving ? 'run' : 'idle';
       }
-      const followRate = 1 - Math.exp(-18 * dt);
+      const followRate = 1 - Math.exp(-20 * dt);
       this.renderX += (this.x - this.renderX) * followRate;
       this.renderY += (this.y - this.renderY) * followRate;
     }
@@ -211,26 +247,41 @@
   class Player extends Actor {
     constructor() {
       super('player');
-      this.inputX = this.x;
-      this.inputY = this.y;
+      this.moveX = 0; // desired move direction, world-space, magnitude <= 1
+      this.moveY = 0;
     }
 
-    moveBy(dx, dy) {
-      this.inputX += dx;
-      this.inputY += dy;
-      const [minX, maxX] = this.boundsX();
-      const [minY, maxY] = this.boundsY();
-      this.inputX = clamp(this.inputX, minX, maxX);
-      this.inputY = clamp(this.inputY, minY, maxY);
+    // Called every frame with the current joystick tilt (world-space axes,
+    // magnitude 0-1); actual acceleration/top-speed is handled in update().
+    setMoveInput(x, y) {
+      this.moveX = x;
+      this.moveY = y;
     }
 
     update(dt) {
+      const MAX_SPEED = 6.8; // m/s -- snappy arcade running speed
+      const ACCEL = 32; // m/s^2 while actively steering
+      const DECEL = 44; // m/s^2 when the stick is released/centered
+
+      const mag = Math.min(1, Math.hypot(this.moveX, this.moveY));
+      const targetVX = mag > 0.001 ? (this.moveX / Math.hypot(this.moveX, this.moveY)) * mag * MAX_SPEED : 0;
+      const targetVY = mag > 0.001 ? (this.moveY / Math.hypot(this.moveX, this.moveY)) * mag * MAX_SPEED : 0;
+      const rate = mag > 0.001 ? ACCEL : DECEL;
+      this.vx += clamp(targetVX - this.vx, -rate * dt, rate * dt);
+      this.vy += clamp(targetVY - this.vy, -rate * dt, rate * dt);
+
       const prevX = this.x, prevY = this.y;
-      const rate = 1 - Math.exp(-14 * dt);
-      this.x += (this.inputX - this.x) * rate;
-      this.y += (this.inputY - this.y) * rate;
-      this.clamp();
-      const moved = Math.hypot(this.x - prevX, this.y - prevY) > 0.002;
+      this.x += this.vx * dt;
+      this.y += this.vy * dt;
+
+      const [minX, maxX] = this.boundsX();
+      const [minY, maxY] = this.boundsY();
+      if (this.x < minX) { this.x = minX; if (this.vx < 0) this.vx = 0; }
+      else if (this.x > maxX) { this.x = maxX; if (this.vx > 0) this.vx = 0; }
+      if (this.y < minY) { this.y = minY; if (this.vy < 0) this.vy = 0; }
+      else if (this.y > maxY) { this.y = maxY; if (this.vy > 0) this.vy = 0; }
+
+      const moved = Math.hypot(this.x - prevX, this.y - prevY) > 0.0015;
       this.updateAnim(dt, moved && this.swingTimer <= 0);
     }
   }
@@ -262,6 +313,8 @@
       this._errX = (Math.random() * 2 - 1) * this.diff.error;
       this._errY = (Math.random() * 2 - 1) * this.diff.error * 0.5;
       this._willMiss = Math.random() < this.diff.missChance;
+      // Where a shot lands relative to this (pre-move) spot decides forehand vs backhand.
+      this.preShotX = this.x;
     }
 
     _trackBall(ball) {
@@ -289,6 +342,7 @@
       const dx = goalX - this.x, dy = goalY - this.y;
       const dist = Math.hypot(dx, dy);
       const maxStep = this.diff.speed * dt;
+      const prevX = this.x, prevY = this.y;
       if (dist > maxStep && dist > 0.0001) {
         this.x += (dx / dist) * maxStep;
         this.y += (dy / dist) * maxStep;
@@ -296,6 +350,10 @@
         this.x = goalX; this.y = goalY;
       }
       this.clamp();
+      if (dt > 0) {
+        this.vx = (this.x - prevX) / dt;
+        this.vy = (this.y - prevY) / dt;
+      }
       this.updateAnim(dt, dist > 0.05 && this.swingTimer <= 0);
 
       const mustLetBounce = ball.requireBounceFor === 'ai' && ball.bounces < 1;
@@ -312,5 +370,6 @@
     G, BALL_RADIUS, HIT_RADIUS, HIT_REACH_Z, OUT_OF_PLAY_MARGIN,
     Ball, Player, AIPlayer,
     pickShotTarget, contactHeight, clamp,
+    SWING_SHAPES,
   };
 })(window);

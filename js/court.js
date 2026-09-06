@@ -10,12 +10,12 @@
     NET_H: 0.914,
     NET_H_CENTER: 0.914, // approximated flat (real net dips slightly at center)
     SERVICE_LINE_FROM_NET: 6.4,
-    playerMinY: 0.9, // how close to the net the human may approach
+    playerMinY: -2.2, // how far behind the baseline the human may retreat
     playerMaxY: null, // set below
     playerMinX: -1.8,
     playerMaxX: null, // set below
     aiMinY: null,
-    aiMaxY: 23.77 - 0.9,
+    aiMaxY: 23.77 + 2.2,
   };
   COURT.playerMaxY = COURT.NET_Y - 0.9;
   COURT.aiMinY = COURT.NET_Y + 0.9;
@@ -66,10 +66,12 @@
 
   // Simple ambient palette for the retro-arcade look.
   const PALETTE = {
-    sky1: '#12233a',
+    sky1: '#0c1830',
     sky2: '#1c3a52',
     stands: '#0b1a28',
     standsLight: '#16324a',
+    standRiser: '#0e2033',
+    standRiserLight: '#193049',
     courtA: '#1c6b46',
     courtB: '#1a6140',
     courtOut: '#124f34',
@@ -83,20 +85,142 @@
     g.addColorStop(0, PALETTE.sky1);
     g.addColorStop(1, PALETTE.sky2);
     ctx.fillStyle = g;
-    ctx.fillRect(0, 0, W_PX, centerY + 2);
+    ctx.fillRect(0, 0, W_PX, H_PX);
+  }
 
-    // Retro pixel "stands" band across the horizon.
-    const standH = Math.max(18, H_PX * 0.06);
-    const standY = centerY - standH * 0.35;
-    ctx.fillStyle = PALETTE.stands;
-    ctx.fillRect(0, standY, W_PX, standH);
-    const blockW = Math.max(10, W_PX / 48);
-    for (let i = 0; i * blockW < W_PX; i++) {
-      if (i % 2 === 0) {
-        ctx.fillStyle = PALETTE.standsLight;
-        ctx.fillRect(i * blockW, standY, blockW * 0.9, standH * 0.55);
+  // ---------- Stadium: tiered stands + crowd on three sides ----------
+  const FAN_COLORS = ['#e0563c', '#e3b23c', '#3c8fe0', '#3ce0a0', '#e0e0e0', '#b23ce0'];
+  const TIERS = 5;
+
+  function buildTierSet(kind) {
+    // kind: 'far' | 'left' | 'right' -- each tier rakes upward+outward with a
+    // row of "seated" fans along it. Positions are fixed once (crowd doesn't
+    // need to be regenerated every frame); a subtle bob is applied at draw time.
+    const tiers = [];
+    for (let i = 0; i < TIERS; i++) {
+      const nearD = 2 + i * 1.7;
+      const farD = nearD + 1.7;
+      const zNear = 0.8 + i * 1.35;
+      const zFar = zNear + 1.35;
+      const fans = [];
+      const count = kind === 'far' ? 26 : 16;
+      const spanMin = kind === 'far' ? -4.2 : -2.5;
+      const spanMax = kind === 'far' ? COURT.W + 4.2 : COURT.L + 2.5;
+      for (let f = 0; f < count; f++) {
+        const t = (f + 0.5) / count;
+        const along = spanMin + t * (spanMax - spanMin);
+        const seatD = nearD + 0.55 * (farD - nearD);
+        const seatZ = zNear + 0.6 * (zFar - zNear);
+        let x, y;
+        if (kind === 'far') { x = along; y = COURT.L + seatD; }
+        else if (kind === 'left') { x = -seatD; y = along; }
+        else { x = COURT.W + seatD; y = along; }
+        fans.push({
+          x, y, z: seatZ,
+          color: FAN_COLORS[(f * 7 + i * 3) % FAN_COLORS.length],
+          phase: ((f * 37 + i * 91) % 100) / 100 * Math.PI * 2,
+          bobSpeed: 1.4 + ((f * 13 + i) % 5) * 0.15,
+        });
       }
+      tiers.push({ kind, i, nearD, farD, zNear, zFar, fans });
     }
+    return tiers;
+  }
+
+  const STANDS = {
+    far: buildTierSet('far'),
+    left: buildTierSet('left'),
+    right: buildTierSet('right'),
+  };
+
+  function tierQuadWorld(tier) {
+    const { kind, nearD, farD, zNear, zFar } = tier;
+    if (kind === 'far') {
+      const xMin = -4.2, xMax = COURT.W + 4.2;
+      return [
+        [xMin, COURT.L + nearD, zNear], [xMax, COURT.L + nearD, zNear],
+        [xMax, COURT.L + farD, zFar], [xMin, COURT.L + farD, zFar],
+      ];
+    }
+    const yMin = -2.5, yMax = COURT.L + 2.5;
+    if (kind === 'left') {
+      return [
+        [-nearD, yMin, zNear], [-nearD, yMax, zNear],
+        [-farD, yMax, zFar], [-farD, yMin, zFar],
+      ];
+    }
+    return [
+      [COURT.W + nearD, yMin, zNear], [COURT.W + nearD, yMax, zNear],
+      [COURT.W + farD, yMax, zFar], [COURT.W + farD, yMin, zFar],
+    ];
+  }
+
+  function drawFan(ctx, fan, time) {
+    const bob = Math.sin(time * fan.bobSpeed + fan.phase) * 0.06;
+    const p = project(fan.x, fan.y, fan.z + bob);
+    if (p.depth < 0.1) return;
+    const s = p.scale;
+    const bodyH = Math.max(1.2, s * 0.55);
+    const bodyW = bodyH * 0.62;
+    const headR = bodyW * 0.42;
+    ctx.fillStyle = fan.color;
+    ctx.fillRect(p.x - bodyW / 2, p.y - bodyH, bodyW, bodyH);
+    ctx.beginPath();
+    ctx.arc(p.x, p.y - bodyH - headR * 0.75, headR, 0, Math.PI * 2);
+    ctx.fillStyle = '#e8b98a';
+    ctx.fill();
+  }
+
+  function drawStandSet(ctx, tiers, time) {
+    for (const tier of tiers) {
+      const quad = polyFromWorld(tierQuadWorld(tier));
+      const shade = tier.i % 2 === 0 ? PALETTE.standRiser : PALETTE.standRiserLight;
+      ctx.fillStyle = shade;
+      ctx.beginPath();
+      ctx.moveTo(quad[0].x, quad[0].y);
+      for (let k = 1; k < quad.length; k++) ctx.lineTo(quad[k].x, quad[k].y);
+      ctx.closePath();
+      ctx.fill();
+    }
+    // Fans drawn after all risers so nearer tiers' crowd isn't hidden by a farther tier's fill.
+    for (const tier of tiers) {
+      for (const fan of tier.fans) drawFan(ctx, fan, time);
+    }
+  }
+
+  function drawFloodlight(ctx, x, y) {
+    const base = project(x, y, 0);
+    const top = project(x, y, 13);
+    if (top.depth < 0.1) return;
+    ctx.strokeStyle = '#1a1a1a';
+    ctx.lineWidth = Math.max(1, top.scale * 0.06);
+    ctx.beginPath();
+    ctx.moveTo(base.x, base.y);
+    ctx.lineTo(top.x, top.y);
+    ctx.stroke();
+
+    const glowR = Math.max(6, top.scale * 1.4);
+    const grad = ctx.createRadialGradient(top.x, top.y, 0, top.x, top.y, glowR);
+    grad.addColorStop(0, 'rgba(255,250,220,0.9)');
+    grad.addColorStop(1, 'rgba(255,250,220,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(top.x, top.y, glowR, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#f4f1cc';
+    const headW = Math.max(3, top.scale * 0.5);
+    ctx.fillRect(top.x - headW / 2, top.y - headW * 0.25, headW, headW * 0.5);
+  }
+
+  function drawStadium(ctx, time) {
+    drawStandSet(ctx, STANDS.left, time);
+    drawStandSet(ctx, STANDS.right, time);
+    drawStandSet(ctx, STANDS.far, time);
+    drawFloodlight(ctx, -5.5, -2.5);
+    drawFloodlight(ctx, COURT.W + 5.5, -2.5);
+    drawFloodlight(ctx, -5.5, COURT.L + 2.5);
+    drawFloodlight(ctx, COURT.W + 5.5, COURT.L + 2.5);
   }
 
   function polyFromWorld(pts) {
@@ -240,8 +364,9 @@
     ctx.fill();
   }
 
-  function render(ctx) {
+  function render(ctx, time) {
     drawBackground(ctx);
+    drawStadium(ctx, time || 0);
     drawCourtSurface(ctx);
     drawLines(ctx);
     drawNet(ctx);

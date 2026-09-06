@@ -99,6 +99,7 @@
     frame: 0,
     joystick: { pointerId: null, nx: 0, ny: 0, baseX: 0, baseY: 0, radius: 60, knobRadius: 28 },
     shotButtons: [],
+    elapsed: 0,
   };
 
   function setBanner(text, sub, dur) {
@@ -114,10 +115,10 @@
   }
 
   function resetReadyPositions() {
-    G.player.x = G.player.inputX = COURT.W / 2;
-    G.player.y = G.player.inputY = COURT.playerMaxY - 2.2;
-    G.ai.x = COURT.W / 2;
-    G.ai.y = G.ai.homeY;
+    // Default to a return-of-serve stance right at (a touch behind) each
+    // baseline; beginServeSetup() then repositions whichever side is serving.
+    G.player.teleportTo(COURT.W / 2, -0.4);
+    G.ai.teleportTo(COURT.W / 2, COURT.L + 0.4);
     G.ai.targetX = G.ai.x;
     G.ai.targetY = G.ai.y;
   }
@@ -127,6 +128,7 @@
     G.serveAttempt = 1;
     G.servePhase = true;
     G.aiReacted = false;
+    G.playerReacted = false;
     beginServeSetup();
   }
 
@@ -137,15 +139,13 @@
     G.serviceBox = box;
     const standX = serverStanceX(server, court);
     if (server === 'player') {
-      G.player.x = G.player.inputX = standX;
-      G.player.y = G.player.inputY = -0.5;
+      G.player.teleportTo(standX, -0.5);
       G.ball.place(standX, -0.5, SERVE_CONTACT_Z);
       G.reticle.x = (box.xMin + box.xMax) / 2;
       G.reticle.y = box.yMin + (box.yMax - box.yMin) * 0.35;
       G.state = 'serveAimPlayer';
     } else {
-      G.ai.x = standX;
-      G.ai.y = COURT.L + 0.5;
+      G.ai.teleportTo(standX, COURT.L + 0.5);
       G.ball.place(standX, COURT.L + 0.5, SERVE_CONTACT_Z);
       G.state = 'serveAI';
       G.serveDelayTimer = 0.85;
@@ -175,7 +175,7 @@
     const T = 0.92 - diff.aimSpread * 0.1 + Math.random() * 0.06;
     G.ball.hit({ x: G.ai.x, y: G.ai.y, z: SERVE_CONTACT_Z }, { x: tx, y: ty, z: 0 }, Math.max(0.68, T), 'ai');
     G.ball.requireBounceFor = 'player';
-    G.ai.triggerSwing('normal');
+    G.ai.triggerServe();
     RetroAudio.sfx.hit();
   }
 
@@ -187,7 +187,7 @@
     const T = 1.0 - Phys.clamp(power, 0, 1) * 0.28;
     G.ball.hit({ x: G.player.x, y: G.player.y, z: SERVE_CONTACT_Z }, { x: tx, y: ty, z: 0 }, T, 'player');
     G.ball.requireBounceFor = 'ai';
-    G.player.triggerSwing(power > 0.7 ? 'power' : 'normal');
+    G.player.triggerServe();
     RetroAudio.sfx.hit();
     G.state = 'rally';
     G.servePhase = true; // still "serve in flight" until first legal bounce resolves
@@ -292,7 +292,8 @@
       'player',
       aimX * 0.5
     );
-    G.player.triggerSwing(preset.power > 0.7 ? 'power' : 'normal');
+    const isForehand = (G.player.x - (G.player.preShotX ?? G.player.x)) * G.player.facing >= 0;
+    G.player.triggerSwing(type, isForehand);
     preset.power > 0.7 ? RetroAudio.sfx.hitPower() : RetroAudio.sfx.hit();
     G.aiReacted = false;
     return true;
@@ -321,7 +322,12 @@
       'ai',
       aimX * 0.5
     );
-    ai.triggerSwing(power > 0.7 ? 'power' : 'normal');
+    let shotType = 'topspin';
+    if (power > 0.65) shotType = 'flat';
+    else if (aimY < 0.3) shotType = 'slice';
+    else if (power < 0.22) shotType = 'lob';
+    const isForehand = (ai.x - (ai.preShotX ?? ai.x)) * ai.facing >= 0;
+    ai.triggerSwing(shotType, isForehand);
     power > 0.7 ? RetroAudio.sfx.hitPower() : RetroAudio.sfx.hit();
   }
 
@@ -432,30 +438,29 @@
     if (j.pointerId === null) {
       j.nx = 0;
       j.ny = 0;
-      return;
-    }
-    const p = RetroInput.pointers.get(j.pointerId);
-    if (!p) {
-      j.pointerId = null;
-      j.nx = 0;
-      j.ny = 0;
-      return;
-    }
-    const dx = p.x - j.baseX, dy = p.y - j.baseY;
-    const mag = Math.hypot(dx, dy);
-    if (mag < 1) {
-      j.nx = 0;
-      j.ny = 0;
     } else {
-      const cl = Math.min(mag, j.radius);
-      j.nx = (dx / mag) * (cl / j.radius);
-      j.ny = (dy / mag) * (cl / j.radius);
+      const p = RetroInput.pointers.get(j.pointerId);
+      if (!p) {
+        j.pointerId = null;
+        j.nx = 0;
+        j.ny = 0;
+      } else {
+        const dx = p.x - j.baseX, dy = p.y - j.baseY;
+        const mag = Math.hypot(dx, dy);
+        if (mag < 1) {
+          j.nx = 0;
+          j.ny = 0;
+        } else {
+          const cl = Math.min(mag, j.radius);
+          j.nx = (dx / mag) * (cl / j.radius);
+          j.ny = (dy / mag) * (cl / j.radius);
+        }
+      }
     }
-    if (Math.hypot(j.nx, j.ny) < 0.08) return;
-    if (G.state === 'rally') {
-      const MOVE_SPEED = 6.0; // m/s, player top running speed
-      G.player.moveBy(j.nx * MOVE_SPEED * dt, -j.ny * MOVE_SPEED * dt);
-    } else if (G.state === 'serveAimPlayer') {
+    const active = Math.hypot(j.nx, j.ny) >= 0.08;
+    if (G.state === 'rally' && G.player) {
+      G.player.setMoveInput(active ? j.nx : 0, active ? -j.ny : 0);
+    } else if (G.state === 'serveAimPlayer' && active) {
       const box = G.serviceBox;
       const RETICLE_SPEED = 4.2; // m/s
       G.reticle.x = Phys.clamp(G.reticle.x + j.nx * RETICLE_SPEED * dt, box.xMin - 0.6, box.xMax + 0.6);
@@ -470,6 +475,7 @@
   // ---------- Update ----------
   function update(dt) {
     G.frame++;
+    G.elapsed += dt;
     computeControlLayout();
     sampleJoystick(dt);
     if (G.state === 'rally') {
@@ -480,6 +486,11 @@
         G.aiReacted = true;
       }
       if (G.ball.lastHitBy === 'ai') G.aiReacted = false;
+      if (G.ball.lastHitBy === 'ai' && !G.playerReacted) {
+        G.player.preShotX = G.player.x;
+        G.playerReacted = true;
+      }
+      if (G.ball.lastHitBy === 'player') G.playerReacted = false;
       G.ai.update(dt, G.ball, aiSwing);
     } else if (G.state === 'serveAI') {
       G.serveDelayTimer -= dt;
@@ -511,26 +522,45 @@
   }
 
   // ---------- Rendering: world ----------
+  function mirrorDeg(a) { return ((180 - a) + 360) % 360; }
+  function lerpAngleDeg(a, b, t) {
+    const diff = (((b - a + 540) % 360) - 180);
+    return a + diff * t;
+  }
+  function easeIn(t) { return t * t; }
+  function easeOut(t) { return 1 - (1 - t) * (1 - t); }
+
   function drawActor(actor, isPlayer) {
     const p = Court.project(actor.renderX, actor.renderY, 0);
     Court.drawShadow(ctx, actor.renderX, actor.renderY, 0, 0.55);
     const scale = p.scale;
     const h = scale * 1.8; // ~1.8m tall figure
     const w = h * 0.52;
-    const bob = actor.anim === 'run' ? Math.sin(actor.animTimer * 14) * h * 0.05 : Math.sin(actor.animTimer * 4) * h * 0.015;
+    const speed = Math.hypot(actor.vx || 0, actor.vy || 0);
+    const speedT = Phys.clamp(speed / 6.5, 0, 1);
+    const running = actor.anim === 'run';
+    const strideFreq = 9 + speedT * 8;
+    const strideAmp = h * (0.11 + speedT * 0.11);
+    const bob = running ? Math.abs(Math.sin(actor.animTimer * strideFreq)) * h * 0.05 : Math.sin(actor.animTimer * 3.4) * h * 0.012;
     const baseY = p.y;
     const bodyColor = isPlayer ? '#e3502f' : '#2f6fe3';
     const bodyDark = isPlayer ? '#a3341c' : '#1c479c';
     const skin = '#f2c49b';
+    const dir = actor.facing; // dominant (racket) shoulder side -- fixed per character
 
     ctx.save();
     ctx.translate(p.x, baseY - bob);
 
-    // legs
-    const legSwing = actor.anim === 'run' ? Math.sin(actor.animTimer * 14) * h * 0.16 : 0;
+    // legs: alternating stride, faster/longer with speed
+    const legSwing = running ? Math.sin(actor.animTimer * strideFreq) * strideAmp : 0;
     ctx.fillStyle = bodyDark;
-    ctx.fillRect(-w * 0.28, -h * 0.42 + legSwing * 0.3, w * 0.22, h * 0.42);
-    ctx.fillRect(w * 0.06, -h * 0.42 - legSwing * 0.3, w * 0.22, h * 0.42);
+    ctx.fillRect(-w * 0.28, -h * 0.42 + legSwing * 0.35, w * 0.22, h * 0.42);
+    ctx.fillRect(w * 0.06, -h * 0.42 - legSwing * 0.35, w * 0.22, h * 0.42);
+
+    // body lean into the direction of travel (subtle, sells the running feel)
+    const lean = running ? Phys.clamp(actor.vx * 0.035, -0.16, 0.16) * w : 0;
+    ctx.save();
+    ctx.translate(lean, 0);
 
     // torso
     ctx.fillStyle = bodyColor;
@@ -542,22 +572,59 @@
     ctx.arc(0, -h * 0.92, w * 0.26, 0, Math.PI * 2);
     ctx.fill();
 
-    // racket arm — angle animates through swing
+    // ---- swing state ----
+    const isSwinging = actor.anim === 'swing';
     let swingT = 0;
-    if (actor.anim === 'swing' || actor.anim === 'swingPower') {
-      const total = 0.32;
-      const elapsed = total - Math.max(actor.swingTimer, 0);
-      swingT = Phys.clamp(elapsed / total, 0, 1);
+    if (isSwinging) {
+      const total = actor.swingDuration || 0.5;
+      swingT = Phys.clamp((total - Math.max(actor.swingTimer, 0)) / total, 0, 1);
     }
-    const dir = isPlayer ? 1 : -1;
-    const baseAngle = -0.6 * dir;
-    const swingAngle = baseAngle + swingT * Math.PI * 1.35 * dir * (actor.anim === 'swingPower' ? 1.15 : 1);
-    const armLen = h * 0.5;
-    const shoulderX = w * 0.28 * dir;
-    const shoulderY = -h * 0.72;
-    const handX = shoulderX + Math.cos(swingAngle) * armLen * 0.55;
-    const handY = shoulderY + Math.sin(swingAngle) * armLen * 0.55;
+    const shape = Phys.SWING_SHAPES[actor.swingType] || Phys.SWING_SHAPES.flat;
+    const isServe = actor.swingType === 'serve';
+    const sweepSign = dir * (actor.isForehand ? -1 : 1);
+    const mirror = sweepSign < 0;
+    const back = mirror ? mirrorDeg(shape.back) : shape.back;
+    const contact = mirror ? mirrorDeg(shape.contact) : shape.contact;
+    const follow = mirror ? mirrorDeg(shape.follow) : shape.follow;
 
+    let angleDeg;
+    if (isSwinging) {
+      angleDeg = swingT < 0.35
+        ? lerpAngleDeg(back, contact, easeIn(swingT / 0.35))
+        : lerpAngleDeg(contact, follow, easeOut((swingT - 0.35) / 0.65));
+    } else {
+      // relaxed ready pose, racket up in front on the dominant side
+      angleDeg = dir > 0 ? 200 : -20;
+    }
+    const angle = (angleDeg * Math.PI) / 180;
+    const toXY = (deg) => {
+      const r = (deg * Math.PI) / 180;
+      return [Math.cos(r), -Math.sin(r)];
+    };
+
+    const armLen = h * (isServe && isSwinging ? 0.62 : 0.5);
+    const shoulderX = w * 0.28 * dir;
+    const shoulderY = isServe && isSwinging ? -h * 0.9 : -h * 0.72;
+    const [adx, ady] = toXY(angleDeg);
+    const handX = shoulderX + adx * armLen * 0.55;
+    const handY = shoulderY + ady * armLen * 0.55;
+
+    // support arm for a two-handed backhand (groundstrokes only, not serve)
+    if (isSwinging && !actor.isForehand && !isServe) {
+      const suppShoulderX = -w * 0.26 * dir;
+      const suppShoulderY = -h * 0.7;
+      const gripX = shoulderX + adx * armLen * 0.38;
+      const gripY = shoulderY + ady * armLen * 0.38;
+      ctx.strokeStyle = skin;
+      ctx.lineWidth = Math.max(1.6, w * 0.12);
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(suppShoulderX, suppShoulderY);
+      ctx.lineTo(gripX, gripY);
+      ctx.stroke();
+    }
+
+    // racket arm
     ctx.strokeStyle = skin;
     ctx.lineWidth = Math.max(2, w * 0.14);
     ctx.lineCap = 'round';
@@ -567,24 +634,36 @@
     ctx.stroke();
 
     // racket
-    const racketAngle = swingAngle;
-    const rHeadX = handX + Math.cos(racketAngle) * armLen * 0.42;
-    const rHeadY = handY + Math.sin(racketAngle) * armLen * 0.42;
+    const rHeadX = handX + adx * armLen * 0.42;
+    const rHeadY = handY + ady * armLen * 0.42;
     ctx.strokeStyle = '#1c1c1c';
     ctx.lineWidth = Math.max(1.5, w * 0.08);
     ctx.beginPath();
     ctx.moveTo(handX, handY);
     ctx.lineTo(rHeadX, rHeadY);
     ctx.stroke();
-    ctx.fillStyle = actor.anim === 'swingPower' ? 'rgba(255,220,120,0.85)' : 'rgba(230,230,230,0.85)';
+    const shotColor = (SHOT_PRESETS[actor.swingType] && SHOT_PRESETS[actor.swingType].color) || '#e6e6e6';
+    const impactT = isSwinging ? Phys.clamp(1 - Math.abs(swingT - 0.38) / 0.22, 0, 1) : 0;
+    ctx.fillStyle = impactT > 0 ? shotColor : 'rgba(230,230,230,0.85)';
     ctx.beginPath();
-    ctx.ellipse(rHeadX, rHeadY, w * 0.22, w * 0.3, racketAngle, 0, Math.PI * 2);
+    ctx.ellipse(rHeadX, rHeadY, w * 0.22, w * 0.3, angle, 0, Math.PI * 2);
     ctx.fill();
     ctx.strokeStyle = '#1c1c1c';
     ctx.lineWidth = 1;
     ctx.stroke();
 
-    ctx.restore();
+    // brief colored impact flash at contact, tinted per shot type
+    if (impactT > 0.05) {
+      ctx.globalAlpha = impactT * 0.7;
+      ctx.fillStyle = shotColor;
+      ctx.beginPath();
+      ctx.arc(rHeadX, rHeadY, w * (0.32 + impactT * 0.35), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.restore(); // lean
+    ctx.restore(); // translate
   }
 
   function drawBall() {
@@ -647,7 +726,7 @@
   }
 
   function renderMatch() {
-    Court.render(ctx);
+    Court.render(ctx, G.elapsed);
     drawServiceBoxHighlight();
 
     const drawables = [
@@ -766,7 +845,7 @@
 
   // ---------- Menu screens ----------
   function drawTitleCourtBackdrop() {
-    Court.render(ctx);
+    Court.render(ctx, G.elapsed);
   }
 
   function screenMenu() {
