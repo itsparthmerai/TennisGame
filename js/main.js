@@ -57,6 +57,13 @@
     slice: { aimY: 0.15, power: 0.20, label: 'SLICE', color: '#c98a2c' },
   };
 
+  // Wimbledon's famous all-whites, with a colored trim so the two players
+  // still read clearly apart at a glance during a fast rally.
+  const KITS = {
+    player: { shirt: '#f6f3e7', shirtShade: '#dcd8c8', trim: '#c23b2b', shorts: '#eeebdd', hair: '#3b2a1a', shoe: '#2a2a2a' },
+    ai: { shirt: '#f2efe3', shirtShade: '#d8d5c5', trim: '#2b5fc2', shorts: '#e9e6d8', hair: '#241a12', shoe: '#232323' },
+  };
+
   // ---------- Service box geometry ----------
   function getServiceBoxTarget(server, court) {
     const halfNear = { yMin: COURT.NET_Y - COURT.SERVICE_LINE_FROM_NET, yMax: COURT.NET_Y };
@@ -543,34 +550,61 @@
     const strideAmp = h * (0.11 + speedT * 0.11);
     const bob = running ? Math.abs(Math.sin(actor.animTimer * strideFreq)) * h * 0.05 : Math.sin(actor.animTimer * 3.4) * h * 0.012;
     const baseY = p.y;
-    const bodyColor = isPlayer ? '#e3502f' : '#2f6fe3';
-    const bodyDark = isPlayer ? '#a3341c' : '#1c479c';
-    const skin = '#f2c49b';
+    const kit = isPlayer ? KITS.player : KITS.ai;
+    const skin = '#e8b98c';
     const dir = actor.facing; // dominant (racket) shoulder side -- fixed per character
 
     ctx.save();
     ctx.translate(p.x, baseY - bob);
 
-    // legs: alternating stride, faster/longer with speed
+    // legs: shoe / sock / shorts stacked per leg, alternating stride
     const legSwing = running ? Math.sin(actor.animTimer * strideFreq) * strideAmp : 0;
-    ctx.fillStyle = bodyDark;
-    ctx.fillRect(-w * 0.28, -h * 0.42 + legSwing * 0.35, w * 0.22, h * 0.42);
-    ctx.fillRect(w * 0.06, -h * 0.42 - legSwing * 0.35, w * 0.22, h * 0.42);
+    const legTop = -h * 0.42, legH = h * 0.42, legW = w * 0.22;
+    const shoeH = legH * 0.16, sockH = legH * 0.56, shortsH = legH * 0.28;
+    const drawLeg = (x, off) => {
+      ctx.fillStyle = kit.shorts;
+      ctx.fillRect(x, legTop + off, legW, shortsH);
+      ctx.fillStyle = skin;
+      ctx.fillRect(x, legTop + shortsH + off, legW, sockH);
+      ctx.fillStyle = kit.shoe;
+      ctx.fillRect(x, legTop + shortsH + sockH + off, legW, shoeH);
+    };
+    drawLeg(-w * 0.28, legSwing * 0.35);
+    drawLeg(w * 0.06, -legSwing * 0.35);
+
+    // hip: rounds off the join between legs and torso
+    ctx.fillStyle = kit.shorts;
+    ctx.beginPath();
+    ctx.ellipse(0, legTop, w * 0.33, h * 0.045, 0, 0, Math.PI * 2);
+    ctx.fill();
 
     // body lean into the direction of travel (subtle, sells the running feel)
     const lean = running ? Phys.clamp(actor.vx * 0.035, -0.16, 0.16) * w : 0;
     ctx.save();
     ctx.translate(lean, 0);
 
-    // torso
-    ctx.fillStyle = bodyColor;
+    // torso -- shaded gradient for a rounder, less flat-rectangle look
+    const torsoGrad = ctx.createLinearGradient(-w * 0.32, 0, w * 0.32, 0);
+    torsoGrad.addColorStop(0, kit.shirt);
+    torsoGrad.addColorStop(1, kit.shirtShade);
+    ctx.fillStyle = torsoGrad;
     ctx.fillRect(-w * 0.32, -h * 0.82, w * 0.64, h * 0.42);
+    // trim stripe down one side + collar
+    ctx.fillStyle = kit.trim;
+    ctx.fillRect(w * 0.18, -h * 0.82, w * 0.06, h * 0.42);
+    ctx.fillRect(-w * 0.1, -h * 0.82, w * 0.2, h * 0.05);
 
-    // head
+    // head + hair + headband
     ctx.fillStyle = skin;
     ctx.beginPath();
     ctx.arc(0, -h * 0.92, w * 0.26, 0, Math.PI * 2);
     ctx.fill();
+    ctx.fillStyle = kit.hair;
+    ctx.beginPath();
+    ctx.arc(0, -h * 0.98, w * 0.235, Math.PI, 0);
+    ctx.fill();
+    ctx.fillStyle = kit.trim;
+    ctx.fillRect(-w * 0.22, -h * 0.955, w * 0.44, h * 0.032);
 
     // ---- swing state ----
     const isSwinging = actor.anim === 'swing';
@@ -644,12 +678,28 @@
     ctx.stroke();
     const shotColor = (SHOT_PRESETS[actor.swingType] && SHOT_PRESETS[actor.swingType].color) || '#e6e6e6';
     const impactT = isSwinging ? Phys.clamp(1 - Math.abs(swingT - 0.38) / 0.22, 0, 1) : 0;
-    ctx.fillStyle = impactT > 0 ? shotColor : 'rgba(230,230,230,0.85)';
+    ctx.fillStyle = impactT > 0 ? shotColor : 'rgba(232,230,222,0.92)';
     ctx.beginPath();
     ctx.ellipse(rHeadX, rHeadY, w * 0.22, w * 0.3, angle, 0, Math.PI * 2);
     ctx.fill();
+
+    // strings: a light crosshatch inside the racket head, in its local frame
+    ctx.save();
+    ctx.translate(rHeadX, rHeadY);
+    ctx.rotate(angle);
+    ctx.strokeStyle = 'rgba(70,65,55,0.55)';
+    ctx.lineWidth = Math.max(0.5, w * 0.016);
+    for (let k = -2; k <= 2; k++) {
+      const t = (k / 3) * w * 0.28;
+      ctx.beginPath(); ctx.moveTo(-w * 0.19, t); ctx.lineTo(w * 0.19, t); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(t * 0.75, -w * 0.28); ctx.lineTo(t * 0.75, w * 0.28); ctx.stroke();
+    }
+    ctx.restore();
+
     ctx.strokeStyle = '#1c1c1c';
-    ctx.lineWidth = 1;
+    ctx.lineWidth = Math.max(1.2, w * 0.045);
+    ctx.beginPath();
+    ctx.ellipse(rHeadX, rHeadY, w * 0.22, w * 0.3, angle, 0, Math.PI * 2);
     ctx.stroke();
 
     // brief colored impact flash at contact, tinted per shot type

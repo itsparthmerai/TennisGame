@@ -64,20 +64,23 @@
     return project(COURT.W / 2, y, 0).scale;
   }
 
-  // Simple ambient palette for the retro-arcade look.
+  // Wimbledon-inspired palette: dark green + purple stands, natural grass.
   const PALETTE = {
-    sky1: '#0c1830',
-    sky2: '#1c3a52',
-    stands: '#0b1a28',
-    standsLight: '#16324a',
-    standRiser: '#0e2033',
-    standRiserLight: '#193049',
-    courtA: '#1c6b46',
-    courtB: '#1a6140',
-    courtOut: '#124f34',
-    line: '#f4f1e6',
+    sky1: '#0a1712',
+    sky2: '#132c22',
+    stands: '#0c2318',
+    standsLight: '#2a1938',
+    standRiser: '#0e2c1e',
+    standRiserLight: '#3a2352',
+    courtA: '#6a9c46',
+    courtB: '#5d8d3c',
+    courtOut: '#3f6b2c',
+    courtWorn: 'rgba(134,107,64,0.5)',
+    line: '#f8f8f2',
     net: '#e9e6da',
-    netPost: '#3a2a1a',
+    netPost: '#173323',
+    backWall: '#0c2c1d',
+    backWallLine: '#154531',
   };
 
   function drawBackground(ctx) {
@@ -89,7 +92,7 @@
   }
 
   // ---------- Stadium: tiered stands + crowd on three sides ----------
-  const FAN_COLORS = ['#e0563c', '#e3b23c', '#3c8fe0', '#3ce0a0', '#e0e0e0', '#b23ce0'];
+  const FAN_COLORS = ['#e8e4d6', '#8a97a8', '#5c4a6e', '#2f4a3a', '#b0463f', '#3f5c8a'];
   const TIERS = 5;
 
   function buildTierSet(kind) {
@@ -217,6 +220,7 @@
     drawStandSet(ctx, STANDS.left, time);
     drawStandSet(ctx, STANDS.right, time);
     drawStandSet(ctx, STANDS.far, time);
+    drawBackWall(ctx);
     drawFloodlight(ctx, -5.5, -2.5);
     drawFloodlight(ctx, COURT.W + 5.5, -2.5);
     drawFloodlight(ctx, -5.5, COURT.L + 2.5);
@@ -227,38 +231,79 @@
     return pts.map(([x, y, z]) => project(x, y, z || 0));
   }
 
-  function drawCourtSurface(ctx) {
-    const { W, L } = COURT;
-    const outMargin = 3.0;
-    // Outer "out of bounds" run-off area
-    const outer = polyFromWorld([
-      [-outMargin, -outMargin],
-      [W + outMargin, -outMargin],
-      [W + outMargin, L + outMargin],
-      [-outMargin, L + outMargin],
-    ]);
-    ctx.fillStyle = PALETTE.courtOut;
+  function fillPoly(ctx, quad, color) {
+    if (color) ctx.fillStyle = color;
     ctx.beginPath();
-    ctx.moveTo(outer[0].x, outer[0].y);
-    for (let i = 1; i < outer.length; i++) ctx.lineTo(outer[i].x, outer[i].y);
+    ctx.moveTo(quad[0].x, quad[0].y);
+    for (let i = 1; i < quad.length; i++) ctx.lineTo(quad[i].x, quad[i].y);
     ctx.closePath();
     ctx.fill();
+  }
 
-    // In-bounds playing surface, split near/far half for subtle checker shading.
-    const half1 = polyFromWorld([[0, 0], [W, 0], [W, COURT.NET_Y], [0, COURT.NET_Y]]);
-    const half2 = polyFromWorld([[0, COURT.NET_Y], [W, COURT.NET_Y], [W, L], [0, L]]);
-    ctx.fillStyle = PALETTE.courtA;
+  function drawWornPatch(ctx, x, y, rxM, ryM) {
+    const p = project(x, y, 0.002);
+    ctx.fillStyle = PALETTE.courtWorn;
     ctx.beginPath();
-    ctx.moveTo(half1[0].x, half1[0].y);
-    for (let i = 1; i < half1.length; i++) ctx.lineTo(half1[i].x, half1[i].y);
-    ctx.closePath();
+    ctx.ellipse(p.x, p.y, rxM * p.scale, ryM * p.scale * 0.45, 0, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = PALETTE.courtB;
-    ctx.beginPath();
-    ctx.moveTo(half2[0].x, half2[0].y);
-    for (let i = 1; i < half2.length; i++) ctx.lineTo(half2[i].x, half2[i].y);
-    ctx.closePath();
-    ctx.fill();
+  }
+
+  function drawCourtSurface(ctx) {
+    const { W, L, NET_Y } = COURT;
+    const outMargin = 3.0;
+
+    // Surrounding grass run-off, out of bounds.
+    fillPoly(ctx, polyFromWorld([
+      [-outMargin, -outMargin], [W + outMargin, -outMargin],
+      [W + outMargin, L + outMargin], [-outMargin, L + outMargin],
+    ]), PALETTE.courtOut);
+
+    // Mowed-stripe grass across the full length, alternating light/dark bands
+    // the way a real lawn (Centre Court included) is cut.
+    const stripes = 16;
+    const stripeH = (L + outMargin * 2) / stripes;
+    for (let i = 0; i < stripes; i++) {
+      const y0 = Math.max(-outMargin + i * stripeH, 0);
+      const y1 = Math.min(-outMargin + (i + 1) * stripeH, L);
+      if (y1 <= y0) continue;
+      fillPoly(ctx, polyFromWorld([[0, y0], [W, y0], [W, y1], [0, y1]]), i % 2 === 0 ? PALETTE.courtA : PALETTE.courtB);
+    }
+
+    // Worn/bare patches where players actually stand -- baseline centers,
+    // the forecourt volley spots, and the service-line "T" -- like grass
+    // courts look by the second week of a tournament.
+    drawWornPatch(ctx, W / 2, 0.55, 1.15, 0.9);
+    drawWornPatch(ctx, W / 2, L - 0.55, 1.15, 0.9);
+    drawWornPatch(ctx, W * 0.28, NET_Y - 6.4, 0.55, 0.45);
+    drawWornPatch(ctx, W * 0.72, NET_Y - 6.4, 0.55, 0.45);
+    drawWornPatch(ctx, W * 0.28, NET_Y + 6.4, 0.55, 0.45);
+    drawWornPatch(ctx, W * 0.72, NET_Y + 6.4, 0.55, 0.45);
+    drawWornPatch(ctx, W / 2, NET_Y - 1.1, 0.85, 0.55);
+    drawWornPatch(ctx, W / 2, NET_Y + 1.1, 0.85, 0.55);
+  }
+
+  function drawBackWall(ctx) {
+    const { W, L } = COURT;
+    const xMin = -2.2, xMax = W + 2.2;
+    const yNear = L + 0.35, yFar = L + 1.7;
+    const zTop = 3.1;
+    const wall = polyFromWorld([[xMin, yNear, zTop], [xMax, yNear, zTop], [xMax, yFar, 0], [xMin, yFar, 0]]);
+    fillPoly(ctx, wall, PALETTE.backWall);
+
+    // A few vertical panel seams for texture.
+    ctx.strokeStyle = PALETTE.backWallLine;
+    ctx.lineWidth = 1.5;
+    const panels = 10;
+    for (let i = 1; i < panels; i++) {
+      const t = i / panels;
+      const x = xMin + (xMax - xMin) * t;
+      const top = project(x, yNear, zTop);
+      const bot = project(x, yFar, 0);
+      ctx.beginPath();
+      ctx.moveTo(top.x, top.y);
+      ctx.lineTo(bot.x, bot.y);
+      ctx.stroke();
+    }
   }
 
   function strokeWorldLine(ctx, a, b, widthM) {
