@@ -145,17 +145,22 @@
     const box = getServiceBoxTarget(server, court);
     G.serviceBox = box;
     const standX = serverStanceX(server, court);
+    // The receiver lines up behind their own baseline, on the same side as
+    // the service box the serve is coming into -- not dead center.
+    const receiveX = Phys.clamp((box.xMin + box.xMax) / 2, COURT.playerMinX + 0.6, COURT.playerMaxX - 0.6);
     if (server === 'player') {
       G.player.teleportTo(standX, -0.5);
       G.ball.place(standX, -0.5, SERVE_CONTACT_Z);
       G.reticle.x = (box.xMin + box.xMax) / 2;
       G.reticle.y = box.yMin + (box.yMax - box.yMin) * 0.35;
       G.state = 'serveAimPlayer';
+      G.ai.teleportTo(receiveX, COURT.L + 0.4);
     } else {
       G.ai.teleportTo(standX, COURT.L + 0.5);
       G.ball.place(standX, COURT.L + 0.5, SERVE_CONTACT_Z);
       G.state = 'serveAI';
       G.serveDelayTimer = 0.85;
+      G.player.teleportTo(receiveX, -0.4);
     }
   }
 
