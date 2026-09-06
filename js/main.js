@@ -48,14 +48,17 @@
 
   const SERVE_CONTACT_Z = 2.8; // high toss + reach, needed for reliable net clearance
 
-  // Each shot button maps to a fixed (depth, power) preset; left/right placement
-  // comes from the joystick's current horizontal tilt at the moment of the swing.
+  // Each shot button has a power/depth RANGE, not a fixed value -- holding the
+  // button charges through that range (a full hold = max power & max depth),
+  // and releasing fires the shot. Left/right placement comes from wherever
+  // the joystick is tilted at the moment of release.
   const SHOT_PRESETS = {
-    topspin: { aimY: 0.85, power: 0.50, label: 'TOPSPIN', color: '#2fae5c' },
-    lob: { aimY: 0.95, power: 0.02, label: 'LOB', color: '#3a6fb0' },
-    flat: { aimY: 0.75, power: 0.80, label: 'FLAT', color: '#a3341c' },
-    slice: { aimY: 0.15, power: 0.20, label: 'SLICE', color: '#c98a2c' },
+    topspin: { aimYMin: 0.50, aimYMax: 0.95, powerMin: 0.30, powerMax: 0.65, label: 'TOPSPIN', color: '#2fae5c' },
+    lob: { aimYMin: 0.50, aimYMax: 0.95, powerMin: 0.00, powerMax: 0.25, label: 'LOB', color: '#3a6fb0' },
+    flat: { aimYMin: 0.45, aimYMax: 0.85, powerMin: 0.50, powerMax: 0.95, label: 'FLAT', color: '#a3341c' },
+    slice: { aimYMin: 0.05, aimYMax: 0.40, powerMin: 0.15, powerMax: 0.45, label: 'SLICE', color: '#c98a2c' },
   };
+  const CHARGE_MAX_SEC = 1.1;
 
   // Wimbledon's famous all-whites, with a colored trim so the two players
   // still read clearly apart at a glance during a fast rally.
@@ -132,6 +135,7 @@
 
   function startPoint() {
     resetReadyPositions();
+    cancelShotCharging();
     G.serveAttempt = 1;
     G.servePhase = true;
     G.aiReacted = false;
@@ -191,12 +195,15 @@
     RetroAudio.sfx.hit();
   }
 
-  function executePlayerServe(power) {
+  function executePlayerServe(chargeFrac, type) {
+    const preset = SHOT_PRESETS[type] || SHOT_PRESETS.flat;
+    const t = Phys.clamp(chargeFrac, 0, 1);
+    const power = preset.powerMin + t * (preset.powerMax - preset.powerMin);
     const box = G.serviceBox;
     const margin = 0.5;
     const tx = Phys.clamp(G.reticle.x, box.xMin - margin, box.xMax + margin);
     const ty = Phys.clamp(G.reticle.y, box.yMin - margin, box.yMax + margin);
-    const T = 1.0 - Phys.clamp(power, 0, 1) * 0.28;
+    const T = 1.0 - power * 0.28;
     G.ball.hit({ x: G.player.x, y: G.player.y, z: SERVE_CONTACT_Z }, { x: tx, y: ty, z: 0 }, T, 'player');
     G.ball.requireBounceFor = 'ai';
     G.player.triggerServe();
@@ -206,6 +213,7 @@
   }
 
   function handleServeFault(reason) {
+    cancelShotCharging();
     if (G.serveAttempt === 1) {
       G.serveAttempt = 2;
       setBanner('FAULT', reason === 'net' ? 'INTO THE NET' : 'OUT', 1.0);
@@ -225,6 +233,7 @@
   }
 
   function awardPoint(winnerSide) {
+    cancelShotCharging();
     const res = G.match.awardPoint(winnerSide);
     const wonByPlayer = winnerSide === 'player';
     if (res.events.includes('match')) {
@@ -285,17 +294,20 @@
     }
   }
 
-  function attemptPlayerHit(type) {
+  function attemptPlayerHit(type, chargeFrac) {
     if (!G.ball.isHittableBy('player')) return false;
     if (G.ball.requireBounceFor === 'player' && G.ball.bounces < 1) return false;
     const dist = G.ball.distanceTo(G.player.x, G.player.y);
     if (dist > Phys.HIT_RADIUS) return false;
 
     const preset = SHOT_PRESETS[type] || SHOT_PRESETS.flat;
-    // Placement (left/right) comes from however far the joystick is currently
-    // tilted -- moving toward a corner naturally aims the shot that way.
+    const t = Phys.clamp(chargeFrac || 0, 0, 1);
+    const power = preset.powerMin + t * (preset.powerMax - preset.powerMin);
+    const aimY = preset.aimYMin + t * (preset.aimYMax - preset.aimYMin);
+    // Placement (left/right) comes from wherever the joystick is tilted at
+    // the moment the button is released.
     const aimX = G.joystick.pointerId !== null ? Phys.clamp(G.joystick.nx, -1, 1) : 0;
-    const target = Phys.pickShotTarget('player', aimX, preset.aimY, preset.power);
+    const target = Phys.pickShotTarget('player', aimX, aimY, power);
     const contactZ = Phys.contactHeight(G.ball.z);
     G.ball.hit(
       { x: G.player.x, y: G.player.y, z: contactZ },
@@ -306,17 +318,16 @@
     );
     const isForehand = (G.player.x - (G.player.preShotX ?? G.player.x)) * G.player.facing >= 0;
     G.player.triggerSwing(type, isForehand);
-    preset.power > 0.7 ? RetroAudio.sfx.hitPower() : RetroAudio.sfx.hit();
+    power > 0.7 ? RetroAudio.sfx.hitPower() : RetroAudio.sfx.hit();
     G.aiReacted = false;
     return true;
   }
 
-  function triggerShotButton(key) {
+  function triggerShotButton(key, chargeFrac) {
     if (G.state === 'rally') {
-      attemptPlayerHit(key);
+      attemptPlayerHit(key, chargeFrac);
     } else if (G.state === 'serveAimPlayer') {
-      const preset = SHOT_PRESETS[key] || SHOT_PRESETS.flat;
-      executePlayerServe(preset.power);
+      executePlayerServe(chargeFrac, key);
     }
   }
 
@@ -350,6 +361,10 @@
     return px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h;
   }
 
+  function anyButtonCharging() {
+    return G.shotButtons.some((b) => b.charging);
+  }
+
   RetroInput.on({
     onDown(id, x, y) {
       RetroAudio.unlock();
@@ -359,11 +374,14 @@
           j.pointerId = id;
           return;
         }
-        for (const b of G.shotButtons) {
-          if (b.pointerId === null && Math.hypot(x - b.x, y - b.y) <= b.r * 1.15) {
-            b.pointerId = id;
-            triggerShotButton(b.key);
-            return;
+        if (!anyButtonCharging()) {
+          for (const b of G.shotButtons) {
+            if (b.pointerId === null && Math.hypot(x - b.x, y - b.y) <= b.r * 1.15) {
+              b.pointerId = id;
+              b.charging = true;
+              b.chargeStart = G.elapsed;
+              return;
+            }
           }
         }
       }
@@ -378,7 +396,10 @@
       }
       for (const b of G.shotButtons) {
         if (b.pointerId === id) {
+          const chargeFrac = b.charging ? Phys.clamp((G.elapsed - b.chargeStart) / CHARGE_MAX_SEC, 0, 1) : 0;
           b.pointerId = null;
+          b.charging = false;
+          triggerShotButton(b.key, chargeFrac);
           return;
         }
       }
@@ -391,6 +412,15 @@
       handleMenuTap(x, y);
     },
   });
+
+  // A held button that never gets released cleanly (finger still down when
+  // the point ends) shouldn't leak a stale charge into whatever comes next.
+  function cancelShotCharging() {
+    for (const b of G.shotButtons) {
+      b.charging = false;
+      b.pointerId = null;
+    }
+  }
 
   function openPause() {
     G.prevState = G.state === 'paused' ? G.prevState : G.state;
@@ -436,6 +466,8 @@
         x: 0,
         y: 0,
         pointerId: null,
+        charging: false,
+        chargeStart: 0,
       }));
     }
     G.shotButtons.forEach((b) => {
@@ -470,8 +502,11 @@
       }
     }
     const active = Math.hypot(j.nx, j.ny) >= 0.08;
+    // While a shot button is held, the stick only steers aim (read at
+    // release) -- it stops moving the player, who plants their feet to swing.
+    const charging = anyButtonCharging();
     if (G.state === 'rally' && G.player) {
-      G.player.setMoveInput(active ? j.nx : 0, active ? -j.ny : 0);
+      G.player.setMoveInput(active && !charging ? j.nx : 0, active && !charging ? -j.ny : 0);
     } else if (G.state === 'serveAimPlayer' && active) {
       const box = G.serviceBox;
       const RETICLE_SPEED = 4.2; // m/s
@@ -835,7 +870,7 @@
     ctx.fillRect(PAUSE_BTN.x + 25, PAUSE_BTN.y + 11, 5, 18);
 
     if (G.state === 'serveAimPlayer') {
-      Font.drawTextCenteredShadowed(ctx, 'JOYSTICK AIMS - BUTTON SERVES', logicalW / 2, logicalH - 20, Math.max(1, scale - 1), '#f4f1e6');
+      Font.drawTextCenteredShadowed(ctx, 'JOYSTICK AIMS - HOLD A BUTTON TO SERVE', logicalW / 2, logicalH - 20, Math.max(1, scale - 1), '#f4f1e6');
     } else if (G.state === 'rally') {
       const hint = G.ball.isHittableBy('player') && G.ball.distanceTo(G.player.x, G.player.y) <= Phys.HIT_RADIUS;
       if (hint) {
@@ -870,8 +905,9 @@
     ctx.fill();
 
     for (const b of G.shotButtons) {
+      const chargeT = b.charging ? Phys.clamp((G.elapsed - b.chargeStart) / CHARGE_MAX_SEC, 0, 1) : 0;
       const pressed = b.pointerId !== null;
-      const r = pressed ? b.r * 1.08 : b.r;
+      const r = pressed ? b.r * (1.06 + chargeT * 0.22) : b.r;
       ctx.fillStyle = pressed ? b.color : 'rgba(6,17,12,0.55)';
       ctx.beginPath();
       ctx.arc(b.x, b.y, r, 0, Math.PI * 2);
@@ -880,6 +916,25 @@
       ctx.lineWidth = 3;
       ctx.stroke();
       Font.drawTextCentered(ctx, b.label, b.x, b.y, 1, pressed ? '#0a1a12' : '#f4f1e6');
+
+      // Power meter: a charge ring that fills clockwise from the top as the
+      // button is held, capping out (and pulsing) once power is maxed.
+      if (b.charging) {
+        const ringR = b.r + 7;
+        ctx.strokeStyle = 'rgba(10,26,18,0.6)';
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, ringR, 0, Math.PI * 2);
+        ctx.stroke();
+
+        const full = chargeT >= 0.995;
+        const pulse = full ? 0.75 + 0.25 * Math.sin(G.elapsed * 14) : 1;
+        ctx.strokeStyle = full ? `rgba(255,232,120,${pulse})` : '#f4f1e6';
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, ringR, -Math.PI / 2, -Math.PI / 2 + chargeT * Math.PI * 2);
+        ctx.stroke();
+      }
     }
   }
 
@@ -964,18 +1019,23 @@
       'USE THE JOYSTICK (BOTTOM LEFT) TO',
       'MOVE YOUR PLAYER AROUND THE COURT.',
       '',
-      'TAP A SHOT BUTTON (BOTTOM RIGHT) TO',
+      'HOLD A SHOT BUTTON (BOTTOM RIGHT) TO',
       'SWING WHEN THE BALL IS IN RANGE -',
+      'THE LONGER YOU HOLD, THE MORE POWER',
+      'AND DEPTH THE SHOT GETS. WATCH THE',
+      'RING FILL UP AROUND THE BUTTON.',
+      '',
       'TOPSPIN IS A SAFE DEEP DRIVE, FLAT IS',
       'FAST & AGGRESSIVE, SLICE IS SHORT &',
       'LOW, LOB ARCS DEEP OVER THE CPU.',
       '',
-      'TILT THE JOYSTICK LEFT OR RIGHT AS',
-      'YOU SWING TO AIM YOUR SHOT.',
+      'WHILE HOLDING, THE JOYSTICK NO LONGER',
+      'MOVES YOU - TILT IT TO AIM, THEN',
+      'RELEASE THE BUTTON TO SWING THAT WAY.',
       '',
-      'TO SERVE: USE THE JOYSTICK TO AIM',
-      'THE RETICLE, THEN TAP ANY SHOT',
-      'BUTTON TO SERVE.',
+      'TO SERVE: AIM THE RETICLE WITH THE',
+      'JOYSTICK, THEN HOLD & RELEASE ANY',
+      'SHOT BUTTON TO SERVE.',
       '',
       'WIN POINTS BY MAKING THE CPU MISS,',
       'HIT THE NET, OR HIT THE BALL OUT.',
