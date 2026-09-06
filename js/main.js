@@ -58,6 +58,9 @@
     flat: { aimYMin: 0.45, aimYMax: 0.85, powerMin: 0.50, powerMax: 0.95, label: 'FLAT', color: '#a3341c' },
     slice: { aimYMin: 0.05, aimYMax: 0.40, powerMin: 0.15, powerMax: 0.45, label: 'SLICE', color: '#c98a2c' },
   };
+  // The serve has its own dedicated button/power range -- no shot-type choice,
+  // just how hard you hit it. Placement comes from the reticle, not aim.
+  const SERVE_PRESET = { powerMin: 0.30, powerMax: 0.92, label: 'SERVE', color: '#d9a441' };
   const CHARGE_MAX_SEC = 1.1;
 
   // Wimbledon's famous all-whites, with a colored trim so the two players
@@ -109,6 +112,7 @@
     frame: 0,
     joystick: { pointerId: null, nx: 0, ny: 0, baseX: 0, baseY: 0, radius: 60, knobRadius: 28 },
     shotButtons: [],
+    serveButton: null,
     elapsed: 0,
   };
 
@@ -195,10 +199,9 @@
     RetroAudio.sfx.hit();
   }
 
-  function executePlayerServe(chargeFrac, type) {
-    const preset = SHOT_PRESETS[type] || SHOT_PRESETS.flat;
+  function executePlayerServe(chargeFrac) {
     const t = Phys.clamp(chargeFrac, 0, 1);
-    const power = preset.powerMin + t * (preset.powerMax - preset.powerMin);
+    const power = SERVE_PRESET.powerMin + t * (SERVE_PRESET.powerMax - SERVE_PRESET.powerMin);
     const box = G.serviceBox;
     const margin = 0.5;
     const tx = Phys.clamp(G.reticle.x, box.xMin - margin, box.xMax + margin);
@@ -326,8 +329,6 @@
   function triggerShotButton(key, chargeFrac) {
     if (G.state === 'rally') {
       attemptPlayerHit(key, chargeFrac);
-    } else if (G.state === 'serveAimPlayer') {
-      executePlayerServe(chargeFrac, key);
     }
   }
 
@@ -362,7 +363,13 @@
   }
 
   function anyButtonCharging() {
-    return G.shotButtons.some((b) => b.charging);
+    return G.shotButtons.some((b) => b.charging) || (G.serveButton && G.serveButton.charging);
+  }
+
+  function startCharging(b, id) {
+    b.pointerId = id;
+    b.charging = true;
+    b.chargeStart = G.elapsed;
   }
 
   RetroInput.on({
@@ -374,12 +381,17 @@
           j.pointerId = id;
           return;
         }
-        if (!anyButtonCharging()) {
+        // Only the button set for the current phase is live: the serve
+        // button while serving, the four shot buttons once it's in play.
+        if (G.state === 'serveAimPlayer') {
+          const b = G.serveButton;
+          if (b && b.pointerId === null && Math.hypot(x - b.x, y - b.y) <= b.r * 1.1) {
+            startCharging(b, id);
+          }
+        } else if (!anyButtonCharging()) {
           for (const b of G.shotButtons) {
             if (b.pointerId === null && Math.hypot(x - b.x, y - b.y) <= b.r * 1.15) {
-              b.pointerId = id;
-              b.charging = true;
-              b.chargeStart = G.elapsed;
+              startCharging(b, id);
               return;
             }
           }
@@ -392,6 +404,14 @@
         j.pointerId = null;
         j.nx = 0;
         j.ny = 0;
+        return;
+      }
+      if (G.serveButton && G.serveButton.pointerId === id) {
+        const b = G.serveButton;
+        const chargeFrac = b.charging ? Phys.clamp((G.elapsed - b.chargeStart) / CHARGE_MAX_SEC, 0, 1) : 0;
+        b.pointerId = null;
+        b.charging = false;
+        if (G.state === 'serveAimPlayer') executePlayerServe(chargeFrac);
         return;
       }
       for (const b of G.shotButtons) {
@@ -419,6 +439,10 @@
     for (const b of G.shotButtons) {
       b.charging = false;
       b.pointerId = null;
+    }
+    if (G.serveButton) {
+      G.serveButton.charging = false;
+      G.serveButton.pointerId = null;
     }
   }
 
@@ -475,6 +499,19 @@
       b.x = cx + offsets[b.key][0];
       b.y = cy + offsets[b.key][1];
     });
+
+    // Serve button sits centered where the shot-button diamond is, but
+    // bigger and alone -- the four shot buttons don't appear until the
+    // serve is actually in play.
+    if (!G.serveButton) {
+      G.serveButton = {
+        key: 'serve', label: SERVE_PRESET.label, color: SERVE_PRESET.color,
+        r: 0, x: 0, y: 0, pointerId: null, charging: false, chargeStart: 0,
+      };
+    }
+    G.serveButton.r = br * 1.55;
+    G.serveButton.x = cx;
+    G.serveButton.y = cy;
   }
 
   function sampleJoystick(dt) {
@@ -870,7 +907,7 @@
     ctx.fillRect(PAUSE_BTN.x + 25, PAUSE_BTN.y + 11, 5, 18);
 
     if (G.state === 'serveAimPlayer') {
-      Font.drawTextCenteredShadowed(ctx, 'JOYSTICK AIMS - HOLD A BUTTON TO SERVE', logicalW / 2, logicalH - 20, Math.max(1, scale - 1), '#f4f1e6');
+      Font.drawTextCenteredShadowed(ctx, 'JOYSTICK AIMS - HOLD SERVE TO SERVE', logicalW / 2, logicalH - 20, Math.max(1, scale - 1), '#f4f1e6');
     } else if (G.state === 'rally') {
       const hint = G.ball.isHittableBy('player') && G.ball.distanceTo(G.player.x, G.player.y) <= Phys.HIT_RADIUS;
       if (hint) {
@@ -904,37 +941,43 @@
     ctx.arc(knobX, knobY, j.knobRadius, 0, Math.PI * 2);
     ctx.fill();
 
-    for (const b of G.shotButtons) {
-      const chargeT = b.charging ? Phys.clamp((G.elapsed - b.chargeStart) / CHARGE_MAX_SEC, 0, 1) : 0;
-      const pressed = b.pointerId !== null;
-      const r = pressed ? b.r * (1.06 + chargeT * 0.22) : b.r;
-      ctx.fillStyle = pressed ? b.color : 'rgba(6,17,12,0.55)';
+    if (G.state === 'serveAimPlayer') {
+      if (G.serveButton) drawChargeButton(G.serveButton, 2);
+    } else {
+      for (const b of G.shotButtons) drawChargeButton(b, 1);
+    }
+  }
+
+  function drawChargeButton(b, labelScale) {
+    const chargeT = b.charging ? Phys.clamp((G.elapsed - b.chargeStart) / CHARGE_MAX_SEC, 0, 1) : 0;
+    const pressed = b.pointerId !== null;
+    const r = pressed ? b.r * (1.06 + chargeT * 0.22) : b.r;
+    ctx.fillStyle = pressed ? b.color : 'rgba(6,17,12,0.55)';
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = b.color;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    Font.drawTextCentered(ctx, b.label, b.x, b.y, labelScale, pressed ? '#0a1a12' : '#f4f1e6');
+
+    // Power meter: a charge ring that fills clockwise from the top as the
+    // button is held, capping out (and pulsing) once power is maxed.
+    if (b.charging) {
+      const ringR = b.r + 7;
+      ctx.strokeStyle = 'rgba(10,26,18,0.6)';
+      ctx.lineWidth = 5;
       ctx.beginPath();
-      ctx.arc(b.x, b.y, r, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = b.color;
-      ctx.lineWidth = 3;
+      ctx.arc(b.x, b.y, ringR, 0, Math.PI * 2);
       ctx.stroke();
-      Font.drawTextCentered(ctx, b.label, b.x, b.y, 1, pressed ? '#0a1a12' : '#f4f1e6');
 
-      // Power meter: a charge ring that fills clockwise from the top as the
-      // button is held, capping out (and pulsing) once power is maxed.
-      if (b.charging) {
-        const ringR = b.r + 7;
-        ctx.strokeStyle = 'rgba(10,26,18,0.6)';
-        ctx.lineWidth = 5;
-        ctx.beginPath();
-        ctx.arc(b.x, b.y, ringR, 0, Math.PI * 2);
-        ctx.stroke();
-
-        const full = chargeT >= 0.995;
-        const pulse = full ? 0.75 + 0.25 * Math.sin(G.elapsed * 14) : 1;
-        ctx.strokeStyle = full ? `rgba(255,232,120,${pulse})` : '#f4f1e6';
-        ctx.lineWidth = 5;
-        ctx.beginPath();
-        ctx.arc(b.x, b.y, ringR, -Math.PI / 2, -Math.PI / 2 + chargeT * Math.PI * 2);
-        ctx.stroke();
-      }
+      const full = chargeT >= 0.995;
+      const pulse = full ? 0.75 + 0.25 * Math.sin(G.elapsed * 14) : 1;
+      ctx.strokeStyle = full ? `rgba(255,232,120,${pulse})` : '#f4f1e6';
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, ringR, -Math.PI / 2, -Math.PI / 2 + chargeT * Math.PI * 2);
+      ctx.stroke();
     }
   }
 
@@ -1016,39 +1059,40 @@
     const lines = [
       'HOW TO PLAY',
       '',
-      'USE THE JOYSTICK (BOTTOM LEFT) TO',
-      'MOVE YOUR PLAYER AROUND THE COURT.',
+      'JOYSTICK (LEFT) MOVES YOU.',
       '',
-      'HOLD A SHOT BUTTON (BOTTOM RIGHT) TO',
-      'SWING WHEN THE BALL IS IN RANGE -',
-      'THE LONGER YOU HOLD, THE MORE POWER',
-      'AND DEPTH THE SHOT GETS. WATCH THE',
-      'RING FILL UP AROUND THE BUTTON.',
+      'HOLD A SHOT BUTTON (RIGHT) TO SWING -',
+      'LONGER HOLDS MEAN MORE POWER & DEPTH.',
+      'TOPSPIN IS SAFE, FLAT IS FAST, SLICE',
+      'IS SHORT, LOB IS HIGH & DEEP.',
       '',
-      'TOPSPIN IS A SAFE DEEP DRIVE, FLAT IS',
-      'FAST & AGGRESSIVE, SLICE IS SHORT &',
-      'LOW, LOB ARCS DEEP OVER THE CPU.',
-      '',
-      'WHILE HOLDING, THE JOYSTICK NO LONGER',
-      'MOVES YOU - TILT IT TO AIM, THEN',
+      'WHILE HOLDING, THE JOYSTICK ONLY AIMS -',
       'RELEASE THE BUTTON TO SWING THAT WAY.',
       '',
-      'TO SERVE: AIM THE RETICLE WITH THE',
-      'JOYSTICK, THEN HOLD & RELEASE ANY',
-      'SHOT BUTTON TO SERVE.',
+      'TO SERVE: AIM WITH THE JOYSTICK, THEN',
+      'HOLD & RELEASE SERVE. SHOT BUTTONS',
+      'APPEAR ONCE IT IS IN PLAY.',
       '',
-      'WIN POINTS BY MAKING THE CPU MISS,',
-      'HIT THE NET, OR HIT THE BALL OUT.',
+      'WIN BY MAKING THE CPU MISS, NET IT,',
+      'OR HIT IT OUT.',
     ];
 
     const titleScale = Math.max(2, Math.min(4, Math.floor(logicalW / 260)));
-    const bodyScale = Math.max(1, Math.min(2, Math.floor(logicalW / 480)));
-    const titleLH = (titleScale + 1) * 11;
-    const bodyLH = (bodyScale + 1) * 11;
-    const blankLH = bodyLH * 0.65;
-
-    const totalH = titleLH + lines.slice(1).reduce((sum, l) => sum + (l === '' ? blankLH : bodyLH), 0);
     const availableH = by - 20;
+    function measure(scale) {
+      const titleLH = (titleScale + 1) * 11;
+      const bodyLH = (scale + 1) * 10;
+      const blankLH = bodyLH * 0.55;
+      const totalH = titleLH + lines.slice(1).reduce((sum, l) => sum + (l === '' ? blankLH : bodyLH), 0);
+      return { titleLH, bodyLH, blankLH, totalH };
+    }
+    let bodyScale = Math.max(1, Math.min(2, Math.floor(logicalW / 480)));
+    let m = measure(bodyScale);
+    if (m.totalH > availableH && bodyScale > 1) {
+      bodyScale = 1;
+      m = measure(bodyScale);
+    }
+    const { titleLH, bodyLH, blankLH, totalH } = m;
     let y = Math.max(28, (availableH - totalH) / 2 + titleLH / 2);
 
     Font.drawTextCentered(ctx, lines[0], logicalW / 2, y, titleScale, '#ffe678');
