@@ -539,11 +539,12 @@
       }
     }
     const active = Math.hypot(j.nx, j.ny) >= 0.08;
-    // While a shot button is held, the stick only steers aim (read at
-    // release) -- it stops moving the player, who plants their feet to swing.
-    const charging = anyButtonCharging();
+    // The stick keeps moving the player the whole time a shot is charging --
+    // you need to be able to chase/track the ball while building power.
+    // Whatever the stick is tilted at the instant the button is released is
+    // read as the shot's aim direction (see attemptPlayerHit).
     if (G.state === 'rally' && G.player) {
-      G.player.setMoveInput(active && !charging ? j.nx : 0, active && !charging ? -j.ny : 0);
+      G.player.setMoveInput(active ? j.nx : 0, active ? -j.ny : 0);
     } else if (G.state === 'serveAimPlayer' && active) {
       const box = G.serviceBox;
       const RETICLE_SPEED = 4.2; // m/s
@@ -614,6 +615,23 @@
   function easeIn(t) { return t * t; }
   function easeOut(t) { return 1 - (1 - t) * (1 - t); }
 
+  function limbCapsule(x1, y1, x2, y2, width, color) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+  }
+
+  function jointDot(x, y, r, color) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
   function drawActor(actor, isPlayer) {
     const p = Court.project(actor.renderX, actor.renderY, 0);
     Court.drawShadow(ctx, actor.renderX, actor.renderY, 0, 0.55);
@@ -634,25 +652,39 @@
     ctx.save();
     ctx.translate(p.x, baseY - bob);
 
-    // legs: shoe / sock / shorts stacked per leg, alternating stride
+    // ---- legs: hip -> knee -> ankle capsules with a bending knee, not flat blocks ----
     const legSwing = running ? Math.sin(actor.animTimer * strideFreq) * strideAmp : 0;
-    const legTop = -h * 0.42, legH = h * 0.42, legW = w * 0.22;
-    const shoeH = legH * 0.16, sockH = legH * 0.56, shortsH = legH * 0.28;
-    const drawLeg = (x, off) => {
-      ctx.fillStyle = kit.shorts;
-      ctx.fillRect(x, legTop + off, legW, shortsH);
-      ctx.fillStyle = skin;
-      ctx.fillRect(x, legTop + shortsH + off, legW, sockH);
+    const legTop = -h * 0.42, legH = h * 0.42, legW = w * 0.145;
+    const thighLen = legH * 0.53, shinLen = legH * 0.47;
+
+    const drawLeg = (hipX, off) => {
+      const kneeX = hipX + off * 0.3;
+      const kneeY = legTop + thighLen;
+      const ankleX = hipX + off * 0.16;
+      const lift = Math.max(0, -off) * 0.18;
+      const ankleY = -legH * 0.09 - lift;
+
+      limbCapsule(hipX, legTop, kneeX, kneeY, legW, skin);
+      limbCapsule(kneeX, kneeY, ankleX, ankleY, legW * 0.82, skin);
+      jointDot(kneeX, kneeY, legW * 0.44, skin);
+
+      // shorts overlay the top of the thigh only
+      const sf = 0.45;
+      limbCapsule(hipX, legTop, hipX + (kneeX - hipX) * sf, legTop + (kneeY - legTop) * sf, legW * 1.2, kit.shorts);
+
+      // shoe
       ctx.fillStyle = kit.shoe;
-      ctx.fillRect(x, legTop + shortsH + sockH + off, legW, shoeH);
+      ctx.beginPath();
+      ctx.ellipse(ankleX + dir * legW * 0.35, ankleY + legW * 0.15, legW * 0.95, legW * 0.5, 0, 0, Math.PI * 2);
+      ctx.fill();
     };
-    drawLeg(-w * 0.28, legSwing * 0.35);
-    drawLeg(w * 0.06, -legSwing * 0.35);
+    drawLeg(-w * 0.17, legSwing);
+    drawLeg(w * 0.17, -legSwing);
 
     // hip: rounds off the join between legs and torso
     ctx.fillStyle = kit.shorts;
     ctx.beginPath();
-    ctx.ellipse(0, legTop, w * 0.33, h * 0.045, 0, 0, Math.PI * 2);
+    ctx.ellipse(0, legTop, w * 0.26, h * 0.05, 0, 0, Math.PI * 2);
     ctx.fill();
 
     // body lean into the direction of travel (subtle, sells the running feel)
@@ -660,28 +692,40 @@
     ctx.save();
     ctx.translate(lean, 0);
 
-    // torso -- shaded gradient for a rounder, less flat-rectangle look
-    const torsoGrad = ctx.createLinearGradient(-w * 0.32, 0, w * 0.32, 0);
-    torsoGrad.addColorStop(0, kit.shirt);
+    // ---- torso: tapered shoulders-to-hips shape, not a flat rectangle ----
+    const shoulderHalfW = w * 0.33, hipHalfW = w * 0.20;
+    const torsoTopY = -h * 0.75, torsoBotY = legTop;
+    ctx.beginPath();
+    ctx.moveTo(-shoulderHalfW, torsoTopY);
+    ctx.lineTo(shoulderHalfW, torsoTopY);
+    ctx.lineTo(hipHalfW, torsoBotY);
+    ctx.lineTo(-hipHalfW, torsoBotY);
+    ctx.closePath();
+    const torsoGrad = ctx.createLinearGradient(-shoulderHalfW, 0, shoulderHalfW, 0);
+    torsoGrad.addColorStop(0, kit.shirtShade);
+    torsoGrad.addColorStop(0.5, kit.shirt);
     torsoGrad.addColorStop(1, kit.shirtShade);
     ctx.fillStyle = torsoGrad;
-    ctx.fillRect(-w * 0.32, -h * 0.82, w * 0.64, h * 0.42);
+    ctx.fill();
     // trim stripe down one side + collar
     ctx.fillStyle = kit.trim;
-    ctx.fillRect(w * 0.18, -h * 0.82, w * 0.06, h * 0.42);
-    ctx.fillRect(-w * 0.1, -h * 0.82, w * 0.2, h * 0.05);
+    ctx.fillRect(w * 0.14, torsoTopY, w * 0.06, torsoBotY - torsoTopY);
+    ctx.fillRect(-w * 0.1, torsoTopY, w * 0.2, h * 0.05);
+
+    // neck
+    limbCapsule(0, torsoTopY + h * 0.015, 0, -h * 0.865, w * 0.13, skin);
 
     // head + hair + headband
     ctx.fillStyle = skin;
     ctx.beginPath();
-    ctx.arc(0, -h * 0.92, w * 0.26, 0, Math.PI * 2);
+    ctx.arc(0, -h * 0.92, w * 0.24, 0, Math.PI * 2);
     ctx.fill();
     ctx.fillStyle = kit.hair;
     ctx.beginPath();
-    ctx.arc(0, -h * 0.98, w * 0.235, Math.PI, 0);
+    ctx.arc(0, -h * 0.975, w * 0.216, Math.PI, 0);
     ctx.fill();
     ctx.fillStyle = kit.trim;
-    ctx.fillRect(-w * 0.22, -h * 0.955, w * 0.44, h * 0.032);
+    ctx.fillRect(-w * 0.2, -h * 0.94, w * 0.4, h * 0.03);
 
     // ---- swing state ----
     const isSwinging = actor.anim === 'swing';
@@ -704,8 +748,9 @@
         ? lerpAngleDeg(back, contact, easeIn(swingT / 0.35))
         : lerpAngleDeg(contact, follow, easeOut((swingT - 0.35) / 0.65));
     } else {
-      // relaxed ready pose, racket up in front on the dominant side
-      angleDeg = dir > 0 ? 200 : -20;
+      // relaxed ready pose, racket held up in front of the body
+      angleDeg = dir > 0 ? 112 : 68;
+      if (running) angleDeg += Math.sin(actor.animTimer * strideFreq) * 9 * dir;
     }
     const angle = (angleDeg * Math.PI) / 180;
     const toXY = (deg) => {
@@ -714,35 +759,44 @@
     };
 
     const armLen = h * (isServe && isSwinging ? 0.62 : 0.5);
-    const shoulderX = w * 0.28 * dir;
+    const shoulderX = w * 0.30 * dir;
     const shoulderY = isServe && isSwinging ? -h * 0.9 : -h * 0.72;
     const [adx, ady] = toXY(angleDeg);
     const handX = shoulderX + adx * armLen * 0.55;
     const handY = shoulderY + ady * armLen * 0.55;
 
+    // sleeve caps smooth the join where each arm meets the torso
+    jointDot(shoulderX, shoulderY, w * 0.13, kit.shirtShade);
+    jointDot(-w * 0.28 * dir, -h * 0.7, w * 0.11, kit.shirtShade);
+
+    // Elbow bends out from the shoulder-to-hand midpoint so the arm reads as
+    // two jointed segments instead of one rigid stick.
+    const elbowOf = (sx, sy, hx, hy, bendScale) => {
+      const ex0 = hx - sx, ey0 = hy - sy;
+      const armDist = Math.hypot(ex0, ey0) || 1;
+      const bend = armLen * bendScale * dir;
+      return [(sx + hx) / 2 - (ey0 / armDist) * bend, (sy + hy) / 2 + (ex0 / armDist) * bend];
+    };
+
     // support arm for a two-handed backhand (groundstrokes only, not serve)
     if (isSwinging && !actor.isForehand && !isServe) {
-      const suppShoulderX = -w * 0.26 * dir;
+      const suppShoulderX = -w * 0.28 * dir;
       const suppShoulderY = -h * 0.7;
       const gripX = shoulderX + adx * armLen * 0.38;
       const gripY = shoulderY + ady * armLen * 0.38;
-      ctx.strokeStyle = skin;
-      ctx.lineWidth = Math.max(1.6, w * 0.12);
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.moveTo(suppShoulderX, suppShoulderY);
-      ctx.lineTo(gripX, gripY);
-      ctx.stroke();
+      const [seX, seY] = elbowOf(suppShoulderX, suppShoulderY, gripX, gripY, 0.12);
+      limbCapsule(suppShoulderX, suppShoulderY, seX, seY, w * 0.135, skin);
+      limbCapsule(seX, seY, gripX, gripY, w * 0.115, skin);
+      jointDot(seX, seY, w * 0.075, skin);
+      jointDot(gripX, gripY, w * 0.08, skin);
     }
 
-    // racket arm
-    ctx.strokeStyle = skin;
-    ctx.lineWidth = Math.max(2, w * 0.14);
-    ctx.lineCap = 'round';
-    ctx.beginPath();
-    ctx.moveTo(shoulderX, shoulderY);
-    ctx.lineTo(handX, handY);
-    ctx.stroke();
+    // racket arm: upper arm + forearm with an elbow joint
+    const [elbowX, elbowY] = elbowOf(shoulderX, shoulderY, handX, handY, 0.16);
+    limbCapsule(shoulderX, shoulderY, elbowX, elbowY, w * 0.15, skin);
+    limbCapsule(elbowX, elbowY, handX, handY, w * 0.125, skin);
+    jointDot(elbowX, elbowY, w * 0.08, skin);
+    jointDot(handX, handY, w * 0.09, skin);
 
     // racket
     const rHeadX = handX + adx * armLen * 0.42;
@@ -1066,8 +1120,9 @@
       'TOPSPIN IS SAFE, FLAT IS FAST, SLICE',
       'IS SHORT, LOB IS HIGH & DEEP.',
       '',
-      'WHILE HOLDING, THE JOYSTICK ONLY AIMS -',
-      'RELEASE THE BUTTON TO SWING THAT WAY.',
+      'KEEP MOVING WHILE YOU CHARGE - WHERE',
+      'THE STICK POINTS WHEN YOU RELEASE IS',
+      'WHERE THE SHOT GOES.',
       '',
       'TO SERVE: AIM WITH THE JOYSTICK, THEN',
       'HOLD & RELEASE SERVE. SHOT BUTTONS',
