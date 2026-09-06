@@ -84,14 +84,22 @@
       this.trail.push({ x: this.x, y: this.y, z: this.z });
       if (this.trail.length > 14) this.trail.shift();
 
-      // Out-of-play safety net so huge mishits resolve quickly.
+      // Out-of-play safety net so huge mishits/rolling balls resolve quickly.
       if (
         this.z > 0 &&
         (this.x < -OUT_OF_PLAY_MARGIN || this.x > COURT.W + OUT_OF_PLAY_MARGIN ||
           this.y < -OUT_OF_PLAY_MARGIN || this.y > COURT.L + OUT_OF_PLAY_MARGIN)
       ) {
         this.state = 'dead';
-        onEvent('out', { lastHitBy: this.lastHitBy });
+        if (this.bounces >= 1) {
+          // It already bounced in play once and nobody returned it -- that
+          // point is already won regardless of where this far-flung, still
+          // airborne ball between bounces eventually ends up.
+          const side = this.y < COURT.NET_Y ? 'player' : 'ai';
+          onEvent('doubleBounce', { side, lastHitBy: this.lastHitBy });
+        } else {
+          onEvent('out', { lastHitBy: this.lastHitBy });
+        }
         return;
       }
 
@@ -122,12 +130,15 @@
         const inBounds = this.x >= 0 && this.x <= COURT.W && this.y >= 0 && this.y <= COURT.L;
         const side = this.y < netY ? 'player' : 'ai';
         onEvent('bounce', { x: this.x, y: this.y, inBounds, bounces: this.bounces, side, lastHitBy: this.lastHitBy });
-        if (!inBounds) {
-          this.state = 'dead';
-          onEvent('out', { lastHitBy: this.lastHitBy, side });
-        } else if (this.bounces >= 2) {
+        if (this.bounces >= 2) {
+          // The opponent already failed to return it after a legal first
+          // bounce -- the point is won right here, regardless of where this
+          // second bounce (often a skidding/rolling ball) happens to land.
           this.state = 'dead';
           onEvent('doubleBounce', { side, lastHitBy: this.lastHitBy });
+        } else if (!inBounds) {
+          this.state = 'dead';
+          onEvent('out', { lastHitBy: this.lastHitBy, side });
         }
       }
     }
@@ -138,7 +149,11 @@
   // power in [0,1] (0=loopy & safe, 1=flat & fast)
   function pickShotTarget(hitterSide, aimX, aimY, power) {
     const halfW = COURT.W / 2;
-    const targetX = clamp(halfW + aimX * (halfW + 1.1), -1.3, COURT.W + 1.3);
+    // Even at full left/right aim this must stay inside the sidelines -- it's
+    // driven directly by joystick tilt, which is often maxed out just from
+    // moving toward the ball, not a deliberate "aim out" risk shot.
+    const sideMargin = 0.25;
+    const targetX = halfW + clamp(aimX, -1, 1) * (halfW - sideMargin);
     let targetY;
     if (hitterSide === 'player') {
       const near = COURT.NET_Y + 1.5;
