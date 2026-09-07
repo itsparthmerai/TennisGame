@@ -804,7 +804,13 @@
     const isServe = actor.swingType === 'serve';
     const isVolley = actor.swingType === 'volley';
     const tossingServe = isPlayer && G.state === 'serveToss';
-    const sweepSign = dir * (actor.isForehand ? -1 : 1);
+    // A forehand is played on the dominant (racket) shoulder's own side, so
+    // it uses the swing shapes exactly as authored; a backhand reaches
+    // across the body to the opposite side, so it mirrors them. This was
+    // previously inverted -- forehands were mirroring across the body and
+    // backhands weren't, which is why contact looked cramped up near the
+    // face instead of extended out to the correct side.
+    const sweepSign = dir * (actor.isForehand ? 1 : -1);
     const mirror = sweepSign < 0;
     const back = mirror ? mirrorDeg(shape.back) : shape.back;
     const contact = mirror ? mirrorDeg(shape.contact) : shape.contact;
@@ -1062,12 +1068,14 @@
     ctx.ellipse(rHeadX, rHeadY, w * 0.22, w * 0.3, angle, 0, Math.PI * 2);
     ctx.stroke();
 
-    // brief colored impact flash at contact, tinted per shot type
+    // brief colored impact flash at contact, tinted per shot type -- kept
+    // tight to the racket head so it never washes over the face on a
+    // backhand or volley, where contact naturally happens closer to the body.
     if (impactT > 0.05) {
       ctx.globalAlpha = impactT * 0.7;
       ctx.fillStyle = shotColor;
       ctx.beginPath();
-      ctx.arc(rHeadX, rHeadY, w * (0.32 + impactT * 0.35), 0, Math.PI * 2);
+      ctx.arc(rHeadX, rHeadY, w * (0.24 + impactT * 0.2), 0, Math.PI * 2);
       ctx.fill();
       ctx.globalAlpha = 1;
     }
