@@ -65,6 +65,8 @@
   }
 
   // Wimbledon-inspired palette: dark green + purple stands, natural grass.
+  // courtA/B/Out/Worn are swapped per surface by setSurface() below; the
+  // stadium colors (stands, net, walls) stay the same across all three.
   const PALETTE = {
     sky1: '#0a1712',
     sky2: '#132c22',
@@ -82,6 +84,25 @@
     backWall: '#0c2c1d',
     backWallLine: '#154531',
   };
+
+  // Real courts differ in look as much as they do in bounce: grass is a
+  // mowed lawn with alternating stripe bands, hard court and clay are a
+  // flat, single-tone surface (mowed:false skips the stripe loop below).
+  const SURFACE_PALETTES = {
+    grass: { courtA: '#6a9c46', courtB: '#5d8d3c', courtOut: '#3f6b2c', courtWorn: 'rgba(134,107,64,0.5)', mowed: true },
+    hard: { courtA: '#2b6ca3', courtB: '#2b6ca3', courtOut: '#1c5c3a', courtWorn: 'rgba(210,220,230,0.4)', mowed: false },
+    clay: { courtA: '#c06a3c', courtB: '#c06a3c', courtOut: '#7a3f22', courtWorn: 'rgba(235,208,175,0.55)', mowed: false },
+  };
+  let currentSurface = 'grass';
+  function setSurface(name) {
+    const key = SURFACE_PALETTES[name] ? name : 'grass';
+    currentSurface = key;
+    const s = SURFACE_PALETTES[key];
+    PALETTE.courtA = s.courtA;
+    PALETTE.courtB = s.courtB;
+    PALETTE.courtOut = s.courtOut;
+    PALETTE.courtWorn = s.courtWorn;
+  }
 
   function drawBackground(ctx) {
     const g = ctx.createLinearGradient(0, 0, 0, centerY);
@@ -275,15 +296,20 @@
       [W + outMargin, L + outMargin], [-outMargin, L + outMargin],
     ]), PALETTE.courtOut);
 
-    // Mowed-stripe grass across the full length, alternating light/dark bands
-    // the way a real lawn (Centre Court included) is cut.
-    const stripes = 16;
-    const stripeH = (L + outMargin * 2) / stripes;
-    for (let i = 0; i < stripes; i++) {
-      const y0 = Math.max(-outMargin + i * stripeH, 0);
-      const y1 = Math.min(-outMargin + (i + 1) * stripeH, L);
-      if (y1 <= y0) continue;
-      fillPoly(ctx, polyFromWorld([[0, y0], [W, y0], [W, y1], [0, y1]]), i % 2 === 0 ? PALETTE.courtA : PALETTE.courtB);
+    if (SURFACE_PALETTES[currentSurface].mowed) {
+      // Mowed-stripe grass across the full length, alternating light/dark
+      // bands the way a real lawn (Centre Court included) is cut.
+      const stripes = 16;
+      const stripeH = (L + outMargin * 2) / stripes;
+      for (let i = 0; i < stripes; i++) {
+        const y0 = Math.max(-outMargin + i * stripeH, 0);
+        const y1 = Math.min(-outMargin + (i + 1) * stripeH, L);
+        if (y1 <= y0) continue;
+        fillPoly(ctx, polyFromWorld([[0, y0], [W, y0], [W, y1], [0, y1]]), i % 2 === 0 ? PALETTE.courtA : PALETTE.courtB);
+      }
+    } else {
+      // Hard court and clay are a flat, single-tone playing surface.
+      fillPoly(ctx, polyFromWorld([[0, 0], [W, 0], [W, L], [0, L]]), PALETTE.courtA);
     }
 
     // Worn/bare patches where players actually stand -- baseline centers,
@@ -438,6 +464,7 @@
     COURT,
     CAM,
     PALETTE,
+    setSurface,
     setViewport,
     project,
     groundScaleAt,

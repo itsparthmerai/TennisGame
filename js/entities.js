@@ -8,8 +8,20 @@
   const BALL_RADIUS = 0.033;
   const HIT_RADIUS = 1.45;
   const HIT_REACH_Z = 2.4;
-  const BOUNCE_DAMP = 0.52;
-  const GROUND_FRICTION = 0.78;
+  // Per-surface bounce/pace: grass is fast with a low, skidding bounce; clay
+  // is slow with a high, grippy bounce; hard court sits in between.
+  const SURFACE_PHYSICS = {
+    grass: { bounceDamp: 0.52, groundFriction: 0.78 },
+    hard: { bounceDamp: 0.60, groundFriction: 0.74 },
+    clay: { bounceDamp: 0.70, groundFriction: 0.65 },
+  };
+  let BOUNCE_DAMP = SURFACE_PHYSICS.grass.bounceDamp;
+  let GROUND_FRICTION = SURFACE_PHYSICS.grass.groundFriction;
+  function setSurface(name) {
+    const s = SURFACE_PHYSICS[name] || SURFACE_PHYSICS.grass;
+    BOUNCE_DAMP = s.bounceDamp;
+    GROUND_FRICTION = s.groundFriction;
+  }
   const NET_FAULT_DAMP = { vx: -0.15, vy: -0.35, vzAbsScale: 0.25 };
   const OUT_OF_PLAY_MARGIN = 7;
 
@@ -425,5 +437,6 @@
     pickShotTarget, contactHeight, clamp,
     SWING_SHAPES, isVolleyRange,
     SPLIT_STEP_DURATION,
+    setSurface,
   };
 })(window);

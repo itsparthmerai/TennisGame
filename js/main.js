@@ -33,6 +33,7 @@
   const Settings = {
     difficulty: 'medium',
     matchMode: 'quick', // 'quick' (4 games, no-ad) | 'full' (6 games, ad) | 'best3' (best of 3 sets, 6 games)
+    court: 'grass', // 'clay' | 'hard' | 'grass' -- picked via the pop-up shown before each new match
     muted: false,
     slowMo: true,
   };
@@ -155,6 +156,8 @@
   }
 
   function newMatch() {
+    Court.setSurface(Settings.court);
+    Phys.setSurface(Settings.court);
     G.match = new TennisMatch(Object.assign({ firstServer: 'player' }, matchConfigFor(Settings.matchMode)));
     G.player = new Phys.Player();
     G.ai = new Phys.AIPlayer(Settings.difficulty);
@@ -1219,6 +1222,28 @@
     ctx.fill();
   }
 
+  // A fixed small corner radius, unlike drawPill's h/2 -- for panels/windows
+  // that are taller than a button, where a pill radius would round them into
+  // a blob instead of a rectangular frame.
+  function drawWindow(x, y, w, h, r, fillColor, strokeColor) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+    if (fillColor) {
+      ctx.fillStyle = fillColor;
+      ctx.fill();
+    }
+    if (strokeColor) {
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  }
+
   function drawHud() {
     const m = G.match;
     if (!m) return;
@@ -1382,8 +1407,7 @@
     const bh = 52, gap = 14;
 
     addMenuButton(bx, by, bw, bh, 'PLAY MATCH', '#2fae5c', () => {
-      newMatch();
-      startPoint();
+      G.state = 'courtSelect';
     });
     by += bh + gap;
     addMenuButton(bx, by, bw, bh, `DIFFICULTY: ${Settings.difficulty.toUpperCase()}`, '#3a6fb0', () => {
@@ -1416,6 +1440,48 @@
     const scale = Math.max(1, Math.min(2, Math.floor(w / 220)));
     Font.drawTextCentered(ctx, label, x + w / 2, y + h / 2, scale, '#f4f1e6');
     G.buttons.push({ x, y, w, h, action });
+  }
+
+  function chooseCourtAndStart(court) {
+    Settings.court = court;
+    newMatch();
+    startPoint();
+  }
+
+  // A modal pop-up (not a full screen swap) shown over the main menu before
+  // every new match, so the court surface is a deliberate choice each time
+  // rather than a buried settings toggle -- surface changes bounce/pace, so
+  // it deserves the same visibility as picking difficulty.
+  function screenCourtSelect() {
+    drawTitleCourtBackdrop();
+    ctx.fillStyle = 'rgba(6,15,11,0.62)';
+    ctx.fillRect(0, 0, logicalW, logicalH);
+
+    const panelW = Math.min(400, logicalW * 0.86);
+    const panelH = Math.min(400, logicalH * 0.86);
+    const panelX = (logicalW - panelW) / 2;
+    const panelY = (logicalH - panelH) / 2;
+    drawWindow(panelX, panelY, panelW, panelH, 16, 'rgba(10,26,18,0.95)', 'rgba(244,241,230,0.4)');
+
+    const titleScale = Math.max(2, Math.min(3, Math.floor(logicalW / 280)));
+    Font.drawTextCenteredShadowed(ctx, 'CHOOSE COURT', logicalW / 2, panelY + 34, titleScale, '#ffe678');
+
+    G.buttons = [];
+    const bw = panelW - 56;
+    const bx = panelX + 28;
+    let by = panelY + 68;
+    const bh = 52, gap = 14;
+
+    addMenuButton(bx, by, bw, bh, 'CLAY', '#c06a3c', () => chooseCourtAndStart('clay'));
+    by += bh + gap;
+    addMenuButton(bx, by, bw, bh, 'HARD COURT', '#2b6ca3', () => chooseCourtAndStart('hard'));
+    by += bh + gap;
+    addMenuButton(bx, by, bw, bh, 'GRASS', '#3f8a4a', () => chooseCourtAndStart('grass'));
+    by += bh + gap;
+    addMenuButton(bx, by, bw, bh, 'BACK', '#5a5a52', goMenu);
+
+    const fscale = Math.max(1, Math.min(2, Math.floor(logicalW / 480)));
+    Font.drawTextCentered(ctx, 'SURFACE CHANGES BOUNCE & PACE', logicalW / 2, panelY + panelH - 16, fscale, '#bdeccb');
   }
 
   function screenHowTo() {
@@ -1536,6 +1602,7 @@
     ctx.clearRect(0, 0, logicalW, logicalH);
     switch (G.state) {
       case 'menu': screenMenu(); break;
+      case 'courtSelect': screenCourtSelect(); break;
       case 'howto': screenHowTo(); break;
       case 'paused': screenPaused(); break;
       case 'matchEnd': screenMatchEnd(); break;
