@@ -418,8 +418,12 @@
   function aiSwing(ai) {
     const diff = ai.diff;
     const aimX = (Math.random() * 2 - 1) * diff.aimSpread;
-    const aimY = 0.35 + Math.random() * 0.65;
-    const power = 0.3 + Math.random() * 0.4 * diff.aimSpread;
+    // Full range so every shot type below is actually reachable -- these
+    // used to be offset so tightly (aimY never below 0.35, power never
+    // below 0.3) that slice and lob could never trigger, and flat only
+    // barely could at the hardest difficulty.
+    const aimY = Math.random();
+    const power = Math.random() * (0.4 + 0.5 * diff.aimSpread);
     const target = Phys.pickShotTarget('ai', aimX, aimY, power);
     const contactZ = Phys.contactHeight(G.ball.z);
     G.ball.hit(
