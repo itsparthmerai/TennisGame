@@ -34,6 +34,7 @@
     difficulty: 'medium',
     matchMode: 'quick', // 'quick' (4 games, no-ad) | 'full' (6 games, ad) | 'best3' (best of 3 sets, 6 games)
     muted: false,
+    slowMo: true,
   };
 
   function matchConfigFor(mode) {
@@ -52,6 +53,16 @@
   const IDEAL_CONTACT_Z = 1.0; // sweet-spot contact height for a rally shot
   const TIMING_TOLERANCE_Z = 1.4; // how forgiving the timing window is
   const SWEET_SPOT_THRESHOLD = 0.82; // timing quality needed for a glowing power shot
+
+  // Bullet-time: as the ball closes in on whichever player is about to hit
+  // it, the whole sim eases into slow motion so the swing (and the timing
+  // window) is easy to actually see, then eases back out right after contact.
+  // Driven purely by ball-to-receiver distance, so it needs no explicit
+  // start/stop triggers -- it naturally ramps down and back up every shot.
+  const SLOWMO_MIN_SCALE = 0.32;
+  const SLOWMO_START_DIST = 3.6; // meters -- still full speed at/beyond this
+  const SLOWMO_FULL_DIST = 1.7; // meters -- fully slowed at/within this
+  const SLOWMO_EASE_RATE = 10; // how fast the scale itself eases toward its target
 
   // Each shot button has a power/depth RANGE, not a fixed value -- tapping the
   // button fires immediately, and how well-timed the tap is (the ball's
@@ -136,6 +147,7 @@
     crowdCheer: 0, // 0..1, decays -- drives a crowd reaction pulse
     shotCallout: null, // { text, t, dur, x, y } "POWER SHOT!"-style callout
     sweetTrailUntil: 0,
+    slowMoScale: 1, // 1 = full speed, eases toward SLOWMO_MIN_SCALE as the ball nears its receiver
   };
 
   function setBanner(text, sub, dur) {
@@ -164,6 +176,7 @@
     G.serveToss = null;
     G.shake = null;
     G.shotCallout = null;
+    G.slowMoScale = 1;
     G.serveAttempt = 1;
     G.servePhase = true;
     G.aiReacted = false;
@@ -586,6 +599,20 @@
     G.state = 'menu';
   }
 
+  // How far the ball still has to go before it reaches whichever player is
+  // about to receive it -- the only input the bullet-time effect needs.
+  function slowMoTargetScale() {
+    if (!Settings.slowMo) return 1;
+    const ball = G.ball;
+    if (!ball || ball.state !== 'inFlight' || !ball.lastHitBy) return 1;
+    const receiver = ball.lastHitBy === 'player' ? G.ai : G.player;
+    const dist = ball.distanceTo(receiver.x, receiver.y);
+    if (dist >= SLOWMO_START_DIST) return 1;
+    if (dist <= SLOWMO_FULL_DIST) return SLOWMO_MIN_SCALE;
+    const t = (dist - SLOWMO_FULL_DIST) / (SLOWMO_START_DIST - SLOWMO_FULL_DIST);
+    return SLOWMO_MIN_SCALE + t * (1 - SLOWMO_MIN_SCALE);
+  }
+
   // ---------- Update ----------
   function update(dt) {
     G.frame++;
@@ -593,8 +620,17 @@
     computeControlLayout();
     sampleJoystick(dt);
     if (G.state === 'rally') {
-      G.ball.update(dt, ballEvent);
-      G.player.update(dt);
+      // Bullet-time: ease the whole sim's timestep toward the target scale
+      // as the ball closes in on its receiver, and back out once it's hit
+      // away again -- this naturally slows down for (and shows off) every
+      // swing without any explicit start/stop bookkeeping.
+      const target = slowMoTargetScale();
+      const ease = 1 - Math.exp(-SLOWMO_EASE_RATE * dt);
+      G.slowMoScale += (target - G.slowMoScale) * ease;
+      const simDt = dt * G.slowMoScale;
+
+      G.ball.update(simDt, ballEvent);
+      G.player.update(simDt);
       if (G.ball.lastHitBy === 'player' && !G.aiReacted) {
         G.ai.startReaction();
         G.aiReacted = true;
@@ -605,43 +641,46 @@
         G.playerReacted = true;
       }
       if (G.ball.lastHitBy === 'player') G.playerReacted = false;
-      G.ai.update(dt, G.ball, aiSwing);
-    } else if (G.state === 'serveAI') {
-      G.serveDelayTimer -= dt;
-      G.ai.updateAnim(dt, false);
-      G.player.updateAnim(dt, false);
-      if (G.serveDelayTimer <= 0) {
-        doAIServe();
-        G.state = 'rally';
-        G.servePhase = true;
-      }
-    } else if (G.state === 'serveAimPlayer') {
-      G.player.updateAnim(dt, false);
-      G.ai.updateAnim(dt, false);
-    } else if (G.state === 'serveToss') {
-      G.player.updateAnim(dt, false);
-      G.ai.updateAnim(dt, false);
-      const st = G.serveToss;
-      if (st) {
-        st.t += dt;
-        const phase = Phys.clamp(st.t / st.duration, 0, 1);
-        G.ball.x = G.player.x;
-        G.ball.y = G.player.y - 0.15;
-        G.ball.z = SERVE_START_Z + (SERVE_CONTACT_Z - SERVE_START_Z) * Math.sin(phase * Math.PI);
-        // The toss must always resolve -- if the player never taps, swing
-        // anyway (with whatever timing quality that leaves) rather than
-        // hanging the point.
-        if (st.t >= st.duration) attemptServeSwing();
-      }
-    } else if (G.state === 'pointEnd') {
-      G.pointEndTimer += dt;
-      G.ball.update(dt, () => {});
-      G.player.updateAnim(dt, false);
-      G.ai.updateAnim(dt, false);
-      if (G.pointEndTimer > 1.15) {
-        const next = G.pointEndNext;
-        G.pointEndNext = null;
-        if (next) next();
+      G.ai.update(simDt, G.ball, aiSwing);
+    } else {
+      G.slowMoScale = 1;
+      if (G.state === 'serveAI') {
+        G.serveDelayTimer -= dt;
+        G.ai.updateAnim(dt, false);
+        G.player.updateAnim(dt, false);
+        if (G.serveDelayTimer <= 0) {
+          doAIServe();
+          G.state = 'rally';
+          G.servePhase = true;
+        }
+      } else if (G.state === 'serveAimPlayer') {
+        G.player.updateAnim(dt, false);
+        G.ai.updateAnim(dt, false);
+      } else if (G.state === 'serveToss') {
+        G.player.updateAnim(dt, false);
+        G.ai.updateAnim(dt, false);
+        const st = G.serveToss;
+        if (st) {
+          st.t += dt;
+          const phase = Phys.clamp(st.t / st.duration, 0, 1);
+          G.ball.x = G.player.x;
+          G.ball.y = G.player.y - 0.15;
+          G.ball.z = SERVE_START_Z + (SERVE_CONTACT_Z - SERVE_START_Z) * Math.sin(phase * Math.PI);
+          // The toss must always resolve -- if the player never taps, swing
+          // anyway (with whatever timing quality that leaves) rather than
+          // hanging the point.
+          if (st.t >= st.duration) attemptServeSwing();
+        }
+      } else if (G.state === 'pointEnd') {
+        G.pointEndTimer += dt;
+        G.ball.update(dt, () => {});
+        G.player.updateAnim(dt, false);
+        G.ai.updateAnim(dt, false);
+        if (G.pointEndTimer > 1.15) {
+          const next = G.pointEndNext;
+          G.pointEndNext = null;
+          if (next) next();
+        }
       }
     }
     if (G.banner) {
@@ -1004,8 +1043,23 @@
     drawShotCallout();
     ctx.restore();
 
+    drawSlowMoVignette();
     drawHud();
     drawBanner();
+  }
+
+  // A faint cool-toned edge vignette that reads as "time is dilating" without
+  // ever obscuring the ball or the swing it's there to show off.
+  function drawSlowMoVignette() {
+    const intensity = Phys.clamp((1 - G.slowMoScale - 0.05) / 0.6, 0, 1);
+    if (intensity <= 0) return;
+    const cx = logicalW / 2, cy = logicalH / 2;
+    const outerR = Math.hypot(cx, cy);
+    const grad = ctx.createRadialGradient(cx, cy, outerR * 0.55, cx, cy, outerR);
+    grad.addColorStop(0, 'rgba(60,110,200,0)');
+    grad.addColorStop(1, `rgba(30,60,140,${0.28 * intensity})`);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, logicalW, logicalH);
   }
 
   // ---------- HUD ----------
@@ -1204,6 +1258,10 @@
       RetroAudio.setMuted(Settings.muted);
     });
     by += bh + gap;
+    addMenuButton(bx, by, bw, bh, `SLOW-MO SWINGS: ${Settings.slowMo ? 'ON' : 'OFF'}`, '#3a6fb0', () => {
+      Settings.slowMo = !Settings.slowMo;
+    });
+    by += bh + gap;
     addMenuButton(bx, by, bw, bh, 'HOW TO PLAY', '#7a5a2f', () => { G.state = 'howto'; });
 
     const fscale = Math.max(1, Math.min(2, Math.floor(logicalW / 480)));
@@ -1233,6 +1291,10 @@
       'TIME IT RIGHT AS THE BALL ARRIVES FOR',
       'A GLOWING POWER SHOT. MISTIME IT AND',
       'IT COMES OUT WEAKER & SHORTER.',
+      '',
+      'THE ACTION SLOWS DOWN AS THE BALL',
+      'CLOSES IN SO YOU CAN SEE THE SWING -',
+      'TURN THIS OFF ANYTIME FROM THE MENU.',
       '',
       'TOPSPIN IS SAFE, FLAT IS FAST, SLICE',
       'IS SHORT, LOB IS HIGH & DEEP.',
