@@ -378,7 +378,11 @@
       aimX * 0.5
     );
     const isForehand = (G.player.x - (G.player.preShotX ?? G.player.x)) * G.player.facing >= 0;
-    G.player.triggerSwing(type, isForehand);
+    // Contact made this close to the net is a volley -- a short compact
+    // punch, not a full groundstroke swing -- regardless of which shot
+    // button was tapped (that still decides aim/power above).
+    const visualType = Phys.isVolleyRange('player', G.player.y) ? 'volley' : type;
+    G.player.triggerSwing(visualType, isForehand);
     power > 0.7 ? RetroAudio.sfx.hitPower() : RetroAudio.sfx.hit();
     G.aiReacted = false;
     const sweet = t >= SWEET_SPOT_THRESHOLD;
@@ -428,6 +432,7 @@
     if (power > 0.65) shotType = 'flat';
     else if (aimY < 0.3) shotType = 'slice';
     else if (power < 0.22) shotType = 'lob';
+    if (Phys.isVolleyRange('ai', ai.y)) shotType = 'volley';
     const isForehand = (ai.x - (ai.preShotX ?? ai.x)) * ai.facing >= 0;
     ai.triggerSwing(shotType, isForehand);
     power > 0.7 ? RetroAudio.sfx.hitPower() : RetroAudio.sfx.hit();
@@ -633,11 +638,13 @@
       G.player.update(simDt);
       if (G.ball.lastHitBy === 'player' && !G.aiReacted) {
         G.ai.startReaction();
+        G.ai.triggerSplitStep();
         G.aiReacted = true;
       }
       if (G.ball.lastHitBy === 'ai') G.aiReacted = false;
       if (G.ball.lastHitBy === 'ai' && !G.playerReacted) {
         G.player.preShotX = G.player.x;
+        G.player.triggerSplitStep();
         G.playerReacted = true;
       }
       if (G.ball.lastHitBy === 'player') G.playerReacted = false;
@@ -708,6 +715,7 @@
   }
   function easeIn(t) { return t * t; }
   function easeOut(t) { return 1 - (1 - t) * (1 - t); }
+  function lerpNum(a, b, t) { return a + (b - a) * t; }
 
   function limbCapsule(x1, y1, x2, y2, width, color) {
     ctx.strokeStyle = color;
@@ -732,22 +740,62 @@
     const scale = p.scale;
     const h = scale * 1.8; // ~1.8m tall figure
     const w = h * 0.52;
-    const speed = Math.hypot(actor.vx || 0, actor.vy || 0);
+    const vx = actor.vx || 0, vy = actor.vy || 0;
+    const speed = Math.hypot(vx, vy);
     const speedT = Phys.clamp(speed / 6.5, 0, 1);
     const running = actor.anim === 'run';
-    const strideFreq = 9 + speedT * 8;
-    const strideAmp = h * (0.11 + speedT * 0.11);
-    const bob = running ? Math.abs(Math.sin(actor.animTimer * strideFreq)) * h * 0.05 : Math.sin(actor.animTimer * 3.4) * h * 0.012;
-    const baseY = p.y;
+    // A pure lateral shuffle (tracking sideways) takes shorter, quicker steps
+    // than a full sprint chasing a ball down the line -- blend continuously
+    // by how sideways-dominant the current movement is, rather than a hard
+    // run/shuffle mode switch that would visibly pop.
+    const lateralRatio = speed > 0.3 ? Phys.clamp(Math.abs(vx) / speed, 0, 1) : 0;
+    const strideFreq = 9 + speedT * 8 + lateralRatio * 3;
+    const strideAmp = h * (0.11 + speedT * 0.11) * (1 - lateralRatio * 0.22);
     const kit = isPlayer ? KITS.player : KITS.ai;
     const skin = '#e8b98c';
     const dir = actor.facing; // dominant (racket) shoulder side -- fixed per character
+
+    // ---- swing state (computed early -- both legs and arms key off it) ----
+    const isSwinging = actor.anim === 'swing';
+    let swingT = 0;
+    if (isSwinging) {
+      const total = actor.swingDuration || 0.5;
+      swingT = Phys.clamp((total - Math.max(actor.swingTimer, 0)) / total, 0, 1);
+    }
+    const swingEase = isSwinging ? Math.sin(swingT * Math.PI) : 0; // 0 at start/end, peaks mid-swing
+    const shape = Phys.SWING_SHAPES[actor.swingType] || Phys.SWING_SHAPES.flat;
+    const isServe = actor.swingType === 'serve';
+    const isVolley = actor.swingType === 'volley';
+    const tossingServe = isPlayer && G.state === 'serveToss';
+    const sweepSign = dir * (actor.isForehand ? -1 : 1);
+    const mirror = sweepSign < 0;
+    const back = mirror ? mirrorDeg(shape.back) : shape.back;
+    const contact = mirror ? mirrorDeg(shape.contact) : shape.contact;
+    const follow = mirror ? mirrorDeg(shape.follow) : shape.follow;
+
+    // Split-step: a quick reactive hop the instant the opponent makes
+    // contact, feet landing slightly wider -- real players are never flat
+    // footed waiting for the ball.
+    const splitDur = Phys.SPLIT_STEP_DURATION || 0.22;
+    const splitFrac = actor.splitStepTimer > 0 ? actor.splitStepTimer / splitDur : 0;
+    const splitHop = splitFrac > 0 ? Math.sin((1 - splitFrac) * Math.PI) : 0;
+
+    // A groundstroke steps into the ball (front foot plants toward contact);
+    // a serve gets an explosive little leg-drive lift instead; a volley's
+    // feet barely move at all -- it's a block, not a swing.
+    const strideStep = (isSwinging && !isServe && !isVolley) ? swingEase * h * 0.05 * sweepSign : 0;
+    const serveLift = (isServe && isSwinging) ? swingEase * h * 0.035 : 0;
+
+    const runBob = running ? Math.abs(Math.sin(actor.animTimer * strideFreq)) * h * 0.05 : Math.sin(actor.animTimer * 3.4) * h * 0.012;
+    const bob = runBob + splitHop * h * 0.045 + serveLift;
+    const baseY = p.y;
 
     ctx.save();
     ctx.translate(p.x, baseY - bob);
 
     // ---- legs: hip -> knee -> ankle capsules with a bending knee, not flat blocks ----
-    const legSwing = running ? Math.sin(actor.animTimer * strideFreq) * strideAmp : 0;
+    const legSwing = running ? Math.sin(actor.animTimer * strideFreq) * strideAmp : strideStep;
+    const stanceWiden = splitHop * w * 0.10;
     const legTop = -h * 0.42, legH = h * 0.42, legW = w * 0.145;
     const thighLen = legH * 0.53, shinLen = legH * 0.47;
 
@@ -772,8 +820,8 @@
       ctx.ellipse(ankleX + dir * legW * 0.35, ankleY + legW * 0.15, legW * 0.95, legW * 0.5, 0, 0, Math.PI * 2);
       ctx.fill();
     };
-    drawLeg(-w * 0.17, legSwing);
-    drawLeg(w * 0.17, -legSwing);
+    drawLeg(-w * 0.17 - stanceWiden, legSwing);
+    drawLeg(w * 0.17 + stanceWiden, -legSwing);
 
     // hip: rounds off the join between legs and torso
     ctx.fillStyle = kit.shorts;
@@ -782,7 +830,7 @@
     ctx.fill();
 
     // body lean into the direction of travel (subtle, sells the running feel)
-    const lean = running ? Phys.clamp(actor.vx * 0.035, -0.16, 0.16) * w : 0;
+    const lean = running ? Phys.clamp(vx * 0.035, -0.16, 0.16) * w : 0;
     ctx.save();
     ctx.translate(lean, 0);
 
@@ -821,29 +869,15 @@
     ctx.fillStyle = kit.trim;
     ctx.fillRect(-w * 0.2, -h * 0.94, w * 0.4, h * 0.03);
 
-    // ---- swing state ----
-    const isSwinging = actor.anim === 'swing';
-    let swingT = 0;
-    if (isSwinging) {
-      const total = actor.swingDuration || 0.5;
-      swingT = Phys.clamp((total - Math.max(actor.swingTimer, 0)) / total, 0, 1);
-    }
-    const shape = Phys.SWING_SHAPES[actor.swingType] || Phys.SWING_SHAPES.flat;
-    const isServe = actor.swingType === 'serve';
-    const sweepSign = dir * (actor.isForehand ? -1 : 1);
-    const mirror = sweepSign < 0;
-    const back = mirror ? mirrorDeg(shape.back) : shape.back;
-    const contact = mirror ? mirrorDeg(shape.contact) : shape.contact;
-    const follow = mirror ? mirrorDeg(shape.follow) : shape.follow;
-
     let angleDeg;
     if (isSwinging) {
       angleDeg = swingT < 0.35
         ? lerpAngleDeg(back, contact, easeIn(swingT / 0.35))
         : lerpAngleDeg(contact, follow, easeOut((swingT - 0.35) / 0.65));
     } else {
-      // relaxed ready pose, racket held up in front of the body
-      angleDeg = dir > 0 ? 112 : 68;
+      // relaxed ready pose, racket held at chest height in front of the
+      // body -- low enough to clear the head, not raised up beside it.
+      angleDeg = dir > 0 ? 170 : 10;
       if (running) angleDeg += Math.sin(actor.animTimer * strideFreq) * 9 * dir;
     }
     const angle = (angleDeg * Math.PI) / 180;
@@ -852,16 +886,22 @@
       return [Math.cos(r), -Math.sin(r)];
     };
 
+    // Hips/shoulders "fire" into a groundstroke rather than just the arm --
+    // a cheap approximation of the coil-and-release weight transfer, done by
+    // shifting both shoulder anchors together rather than literally rotating
+    // the torso polygon (which would tear away from the arms on this flat
+    // capsule rig).
+    const rotPunch = (isSwinging && !isServe && !isVolley) ? swingEase * 0.10 * sweepSign : 0;
+
     const armLen = h * (isServe && isSwinging ? 0.62 : 0.5);
-    const shoulderX = w * 0.30 * dir;
+    const shoulderX = w * 0.30 * dir + rotPunch * w;
     const shoulderY = isServe && isSwinging ? -h * 0.9 : -h * 0.72;
     const [adx, ady] = toXY(angleDeg);
-    const handX = shoulderX + adx * armLen * 0.55;
-    const handY = shoulderY + ady * armLen * 0.55;
-
-    // sleeve caps smooth the join where each arm meets the torso
-    jointDot(shoulderX, shoulderY, w * 0.13, kit.shirtShade);
-    jointDot(-w * 0.28 * dir, -h * 0.7, w * 0.11, kit.shirtShade);
+    // A full swing reaches the racket way out; the resting ready pose keeps
+    // it in close, at chest height, well clear of the head.
+    const reach = isSwinging ? 0.55 : 0.36;
+    const handX = shoulderX + adx * armLen * reach;
+    const handY = shoulderY + ady * armLen * reach;
 
     // Elbow bends out from the shoulder-to-hand midpoint so the arm reads as
     // two jointed segments instead of one rigid stick.
@@ -872,17 +912,57 @@
       return [(sx + hx) / 2 - (ey0 / armDist) * bend, (sy + hy) / 2 + (ex0 / armDist) * bend];
     };
 
-    // support arm for a two-handed backhand (groundstrokes only, not serve)
-    if (isSwinging && !actor.isForehand && !isServe) {
-      const suppShoulderX = -w * 0.28 * dir;
-      const suppShoulderY = -h * 0.7;
+    // ---- off (non-racket) arm: always drawn, not just for a two-handed
+    // backhand -- it counter-swings while running, reaches up for the serve
+    // toss, and eases down through the serve motion. ----
+    const twoHandedBackhandSwing = isSwinging && !actor.isForehand && !isServe;
+    let offAngleDeg, offShoulderY, offArmLenScale;
+    if (isServe && isSwinging) {
+      offAngleDeg = lerpNum(90, 55, swingT);
+      offShoulderY = -h * 0.9;
+      offArmLenScale = 0.5;
+    } else if (tossingServe) {
+      offAngleDeg = 90;
+      offShoulderY = -h * 0.88;
+      offArmLenScale = 0.56;
+    } else if (running) {
+      // A sprinter's off arm pumps front-to-back at roughly waist height,
+      // opposite the racket arm's much smaller sway -- keep it low so it
+      // never reaches up into the head like the racket-ready arm does.
+      offAngleDeg = 250 + Math.sin(actor.animTimer * strideFreq) * 35 * dir;
+      offShoulderY = -h * 0.7;
+      offArmLenScale = 0.38;
+    } else {
+      // relaxed at the side / resting near the racket throat
+      offAngleDeg = 255;
+      offShoulderY = -h * 0.7;
+      offArmLenScale = 0.4;
+    }
+    const offShoulderX = -w * 0.28 * dir + rotPunch * w;
+    const offArmLen = h * offArmLenScale;
+    const [odx, ody] = toXY(offAngleDeg);
+    const offHandX = offShoulderX + odx * offArmLen * 0.55;
+    const offHandY = offShoulderY + ody * offArmLen * 0.55;
+
+    // sleeve caps smooth the join where each arm meets the torso
+    jointDot(shoulderX, shoulderY, w * 0.13, kit.shirtShade);
+    jointDot(offShoulderX, offShoulderY, w * 0.11, kit.shirtShade);
+
+    if (twoHandedBackhandSwing) {
+      // support arm reaches to the racket grip for a two-handed backhand
       const gripX = shoulderX + adx * armLen * 0.38;
       const gripY = shoulderY + ady * armLen * 0.38;
-      const [seX, seY] = elbowOf(suppShoulderX, suppShoulderY, gripX, gripY, 0.12);
-      limbCapsule(suppShoulderX, suppShoulderY, seX, seY, w * 0.135, skin);
+      const [seX, seY] = elbowOf(offShoulderX, offShoulderY, gripX, gripY, 0.12);
+      limbCapsule(offShoulderX, offShoulderY, seX, seY, w * 0.135, skin);
       limbCapsule(seX, seY, gripX, gripY, w * 0.115, skin);
       jointDot(seX, seY, w * 0.075, skin);
       jointDot(gripX, gripY, w * 0.08, skin);
+    } else {
+      const [oElbowX, oElbowY] = elbowOf(offShoulderX, offShoulderY, offHandX, offHandY, 0.16);
+      limbCapsule(offShoulderX, offShoulderY, oElbowX, oElbowY, w * 0.135, skin);
+      limbCapsule(oElbowX, oElbowY, offHandX, offHandY, w * 0.115, skin);
+      jointDot(oElbowX, oElbowY, w * 0.075, skin);
+      jointDot(offHandX, offHandY, w * 0.08, skin);
     }
 
     // racket arm: upper arm + forearm with an elbow joint

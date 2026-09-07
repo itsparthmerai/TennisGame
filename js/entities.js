@@ -181,6 +181,9 @@
   // ---------- Characters ----------
   const SWING_DURATION = 0.5; // groundstroke, seconds
   const SERVE_SWING_DURATION = 0.62;
+  const VOLLEY_SWING_DURATION = 0.22; // a volley is a short compact punch, not a full swing
+  const SPLIT_STEP_DURATION = 0.22; // quick reactive hop the instant the opponent makes contact
+  const VOLLEY_ZONE_DEPTH = 3.0; // meters from the net -- contact made this close is a volley, not a groundstroke
 
   // Canonical swing shapes for a left-to-right sweep (screen-space degrees,
   // 0=right/90=up/180=left/270=down). Mirrored at draw time for the other
@@ -191,7 +194,17 @@
     slice: { back: 160, contact: 350, follow: 12 },
     lob: { back: 210, contact: 350, follow: 95 },
     serve: { back: 255, contact: 97, follow: 15 },
+    // Almost no backswing and a short punch through -- a volley is a block,
+    // not a swing.
+    volley: { back: 335, contact: 358, follow: 15 },
   };
+
+  // A shot struck this close to the net is played as a volley (a compact
+  // punch/block) rather than a full groundstroke swing, regardless of which
+  // shot button was tapped for aim/power.
+  function isVolleyRange(side, y) {
+    return side === 'player' ? y > COURT.NET_Y - VOLLEY_ZONE_DEPTH : y < COURT.NET_Y + VOLLEY_ZONE_DEPTH;
+  }
 
   class Actor {
     constructor(side) {
@@ -209,6 +222,7 @@
       this.swingDuration = SWING_DURATION;
       this.swingType = 'flat';
       this.isForehand = true;
+      this.splitStepTimer = 0;
     }
 
     boundsX() { return [COURT.playerMinX, COURT.playerMaxX]; }
@@ -226,8 +240,16 @@
       this.swingType = SWING_SHAPES[shotType] ? shotType : 'flat';
       this.isForehand = isForehand !== false;
       this.animTimer = 0;
-      this.swingDuration = SWING_DURATION;
-      this.swingTimer = SWING_DURATION;
+      this.swingDuration = this.swingType === 'volley' ? VOLLEY_SWING_DURATION : SWING_DURATION;
+      this.swingTimer = this.swingDuration;
+      this.splitStepTimer = 0;
+    }
+
+    // Called the instant the opponent makes contact -- a real player's feet
+    // are already moving before the ball arrives, not frozen until it does.
+    triggerSplitStep() {
+      if (this.swingTimer > 0) return; // don't stomp an in-progress swing pose
+      this.splitStepTimer = SPLIT_STEP_DURATION;
     }
 
     triggerServe() {
@@ -253,6 +275,7 @@
       } else {
         this.anim = moving ? 'run' : 'idle';
       }
+      if (this.splitStepTimer > 0) this.splitStepTimer -= dt;
       const followRate = 1 - Math.exp(-20 * dt);
       this.renderX += (this.x - this.renderX) * followRate;
       this.renderY += (this.y - this.renderY) * followRate;
@@ -385,6 +408,7 @@
     G, BALL_RADIUS, HIT_RADIUS, HIT_REACH_Z, OUT_OF_PLAY_MARGIN,
     Ball, Player, AIPlayer,
     pickShotTarget, contactHeight, clamp,
-    SWING_SHAPES,
+    SWING_SHAPES, isVolleyRange,
+    SPLIT_STEP_DURATION,
   };
 })(window);
