@@ -717,6 +717,31 @@
   function easeOut(t) { return 1 - (1 - t) * (1 - t); }
   function lerpNum(a, b, t) { return a + (b - a) * t; }
 
+  // Two-bone IK: given a shoulder and a desired hand position, solves for an
+  // elbow that keeps the upper-arm/forearm lengths fixed -- so the joint
+  // always bends a believable amount for how far the hand actually reaches
+  // (barely bent near full extension, sharply bent up close), instead of an
+  // arbitrary fixed offset that looked like a "kink" at short reaches.
+  // bendSign picks which side the elbow points to (+1/-1).
+  function solveArmIK(sx, sy, hx, hy, upperLen, foreLen, bendSign) {
+    const dx = hx - sx, dy = hy - sy;
+    const d = Math.hypot(dx, dy) || 0.0001;
+    const maxReach = upperLen + foreLen - 0.001;
+    const minReach = Math.abs(upperLen - foreLen) + 0.001;
+    const dC = Phys.clamp(d, minReach, maxReach);
+    const ux = dx / d, uy = dy / d;
+    const baseAngle = Math.atan2(uy, ux);
+    const cosA = Phys.clamp((upperLen * upperLen + dC * dC - foreLen * foreLen) / (2 * upperLen * dC), -1, 1);
+    const a1 = Math.acos(cosA);
+    const elbowAngle = baseAngle + bendSign * a1;
+    return {
+      elbowX: sx + Math.cos(elbowAngle) * upperLen,
+      elbowY: sy + Math.sin(elbowAngle) * upperLen,
+      handX: sx + ux * dC,
+      handY: sy + uy * dC,
+    };
+  }
+
   function limbCapsule(x1, y1, x2, y2, width, color) {
     ctx.strokeStyle = color;
     ctx.lineWidth = width;
@@ -875,106 +900,124 @@
         ? lerpAngleDeg(back, contact, easeIn(swingT / 0.35))
         : lerpAngleDeg(contact, follow, easeOut((swingT - 0.35) / 0.65));
     } else {
-      // relaxed ready pose, racket held at chest height in front of the
-      // body -- low enough to clear the head, not raised up beside it.
-      angleDeg = dir > 0 ? 170 : 10;
-      if (running) angleDeg += Math.sin(actor.animTimer * strideFreq) * 9 * dir;
+      // Racket angle only matters for which way the head/strings face --
+      // hand placement (neutral grip vs. running carry) is set separately
+      // below, so this just needs to look like a natural wrist angle.
+      angleDeg = dir > 0 ? 100 : 80;
     }
-    const angle = (angleDeg * Math.PI) / 180;
     const toXY = (deg) => {
       const r = (deg * Math.PI) / 180;
       return [Math.cos(r), -Math.sin(r)];
     };
+    const [adx, ady] = toXY(angleDeg);
 
     // Hips/shoulders "fire" into a groundstroke rather than just the arm --
     // a cheap approximation of the coil-and-release weight transfer, done by
-    // shifting both shoulder anchors together rather than literally rotating
-    // the torso polygon (which would tear away from the arms on this flat
-    // capsule rig).
-    const rotPunch = (isSwinging && !isServe && !isVolley) ? swingEase * 0.10 * sweepSign : 0;
+    // shifting both shoulder anchors together (clamped so they never pop
+    // outside the torso outline) rather than literally rotating the torso
+    // polygon, which would tear away from the arms on this flat capsule rig.
+    const rotPunch = (isSwinging && !isServe && !isVolley) ? swingEase * 0.07 * sweepSign : 0;
+    const shoulderSpan = shoulderHalfW * 0.92;
 
     const armLen = h * (isServe && isSwinging ? 0.62 : 0.5);
-    const shoulderX = w * 0.30 * dir + rotPunch * w;
+    const shoulderX = Phys.clamp(w * 0.30 * dir + rotPunch * w, -shoulderSpan, shoulderSpan);
     const shoulderY = isServe && isSwinging ? -h * 0.9 : -h * 0.72;
-    const [adx, ady] = toXY(angleDeg);
-    // A full swing reaches the racket way out; the resting ready pose keeps
-    // it in close, at chest height, well clear of the head.
-    const reach = isSwinging ? 0.55 : 0.36;
-    const handX = shoulderX + adx * armLen * reach;
-    const handY = shoulderY + ady * armLen * reach;
+    const offShoulderX = Phys.clamp(-w * 0.28 * dir + rotPunch * w, -shoulderSpan, shoulderSpan);
+    const offShoulderY = -h * 0.7;
 
-    // Elbow bends out from the shoulder-to-hand midpoint so the arm reads as
-    // two jointed segments instead of one rigid stick.
-    const elbowOf = (sx, sy, hx, hy, bendScale) => {
-      const ex0 = hx - sx, ey0 = hy - sy;
-      const armDist = Math.hypot(ex0, ey0) || 1;
-      const bend = armLen * bendScale * dir;
-      return [(sx + hx) / 2 - (ey0 / armDist) * bend, (sy + hy) / 2 + (ex0 / armDist) * bend];
-    };
+    // Real upper-arm/forearm bone lengths -- fixed regardless of pose, so
+    // the two-bone IK below always bends the elbow a believable amount for
+    // how far the hand is actually reaching (see solveArmIK).
+    const upperLen = h * 0.2, foreLen = h * 0.18;
+    // Both elbows point outward, away from the torso centerline -- the
+    // natural direction for a relaxed or reaching human arm.
+    const bendSign = -dir;
+    const offBendSign = dir;
 
-    // ---- off (non-racket) arm: always drawn, not just for a two-handed
-    // backhand -- it counter-swings while running, reaches up for the serve
-    // toss, and eases down through the serve motion. ----
+    // ---- where each hand is trying to go ----
+    // A full swing reaches the racket way out along the swing arc. At rest,
+    // both hands hold the racket together at the grip, in front of the
+    // stomach -- a real, neutral tennis-ready position -- and only drift
+    // apart while sprinting, where the racket is carried in the dominant
+    // hand and the other arm swings free for balance.
+    const neutralGripX = dir * w * 0.05;
+    const neutralGripY = -h * 0.56;
     const twoHandedBackhandSwing = isSwinging && !actor.isForehand && !isServe;
-    let offAngleDeg, offShoulderY, offArmLenScale;
-    if (isServe && isSwinging) {
-      offAngleDeg = lerpNum(90, 55, swingT);
-      offShoulderY = -h * 0.9;
-      offArmLenScale = 0.5;
-    } else if (tossingServe) {
-      offAngleDeg = 90;
-      offShoulderY = -h * 0.88;
-      offArmLenScale = 0.56;
+
+    let handTargetX, handTargetY, headExt;
+    if (isSwinging) {
+      const reach = 0.55;
+      handTargetX = shoulderX + adx * armLen * reach;
+      handTargetY = shoulderY + ady * armLen * reach;
+      headExt = 0.42;
     } else if (running) {
-      // A sprinter's off arm pumps front-to-back at roughly waist height,
-      // opposite the racket arm's much smaller sway -- keep it low so it
-      // never reaches up into the head like the racket-ready arm does.
-      offAngleDeg = 250 + Math.sin(actor.animTimer * strideFreq) * 35 * dir;
-      offShoulderY = -h * 0.7;
-      offArmLenScale = 0.38;
+      // carried low and in close, at hip height, on the dominant side
+      const carryAngle = 260 + Math.sin(actor.animTimer * strideFreq) * 10 * dir;
+      const [cdx, cdy] = toXY(carryAngle);
+      handTargetX = shoulderX + cdx * armLen * 0.34;
+      handTargetY = shoulderY + cdy * armLen * 0.34;
+      headExt = 0.34;
     } else {
-      // relaxed at the side / resting near the racket throat
-      offAngleDeg = 255;
-      offShoulderY = -h * 0.7;
-      offArmLenScale = 0.4;
+      handTargetX = neutralGripX;
+      handTargetY = neutralGripY;
+      headExt = 0.34;
     }
-    const offShoulderX = -w * 0.28 * dir + rotPunch * w;
-    const offArmLen = h * offArmLenScale;
-    const [odx, ody] = toXY(offAngleDeg);
-    const offHandX = offShoulderX + odx * offArmLen * 0.55;
-    const offHandY = offShoulderY + ody * offArmLen * 0.55;
+
+    let offTargetX, offTargetY;
+    if (isServe && isSwinging) {
+      const [odx2, ody2] = toXY(lerpNum(90, 55, swingT));
+      offTargetX = offShoulderX + odx2 * offArmLenFor(0.5);
+      offTargetY = offShoulderY - h * 0.18 + ody2 * offArmLenFor(0.5);
+    } else if (tossingServe) {
+      offTargetX = offShoulderX;
+      offTargetY = offShoulderY - h * 0.5;
+    } else if (twoHandedBackhandSwing) {
+      offTargetX = handTargetX;
+      offTargetY = handTargetY;
+    } else if (running) {
+      // free arm pumps opposite the legs, low, for balance
+      const pumpAngle = 250 + Math.sin(actor.animTimer * strideFreq) * 35 * dir;
+      const [odx3, ody3] = toXY(pumpAngle);
+      offTargetX = offShoulderX + odx3 * (upperLen + foreLen) * 0.72;
+      offTargetY = offShoulderY + ody3 * (upperLen + foreLen) * 0.72;
+    } else {
+      // resting on the racket throat -- the classic two-handed ready grip
+      offTargetX = neutralGripX;
+      offTargetY = neutralGripY;
+    }
+    function offArmLenFor(scale) { return h * scale * 0.55; }
 
     // sleeve caps smooth the join where each arm meets the torso
     jointDot(shoulderX, shoulderY, w * 0.13, kit.shirtShade);
     jointDot(offShoulderX, offShoulderY, w * 0.11, kit.shirtShade);
 
-    if (twoHandedBackhandSwing) {
-      // support arm reaches to the racket grip for a two-handed backhand
-      const gripX = shoulderX + adx * armLen * 0.38;
-      const gripY = shoulderY + ady * armLen * 0.38;
-      const [seX, seY] = elbowOf(offShoulderX, offShoulderY, gripX, gripY, 0.12);
-      limbCapsule(offShoulderX, offShoulderY, seX, seY, w * 0.135, skin);
-      limbCapsule(seX, seY, gripX, gripY, w * 0.115, skin);
-      jointDot(seX, seY, w * 0.075, skin);
-      jointDot(gripX, gripY, w * 0.08, skin);
-    } else {
-      const [oElbowX, oElbowY] = elbowOf(offShoulderX, offShoulderY, offHandX, offHandY, 0.16);
-      limbCapsule(offShoulderX, offShoulderY, oElbowX, oElbowY, w * 0.135, skin);
-      limbCapsule(oElbowX, oElbowY, offHandX, offHandY, w * 0.115, skin);
-      jointDot(oElbowX, oElbowY, w * 0.075, skin);
-      jointDot(offHandX, offHandY, w * 0.08, skin);
-    }
+    const racketArm = solveArmIK(shoulderX, shoulderY, handTargetX, handTargetY, upperLen, foreLen, bendSign);
+    const offArm = solveArmIK(offShoulderX, offShoulderY, offTargetX, offTargetY, upperLen, foreLen, offBendSign);
+    const handX = racketArm.handX, handY = racketArm.handY;
+    const offHandX = offArm.handX, offHandY = offArm.handY;
+
+    // off (non-racket) arm: upper arm + forearm with an elbow joint --
+    // always drawn, not just for a two-handed backhand.
+    limbCapsule(offShoulderX, offShoulderY, offArm.elbowX, offArm.elbowY, w * 0.135, skin);
+    limbCapsule(offArm.elbowX, offArm.elbowY, offHandX, offHandY, w * 0.115, skin);
+    jointDot(offArm.elbowX, offArm.elbowY, w * 0.075, skin);
+    jointDot(offHandX, offHandY, w * 0.08, skin);
 
     // racket arm: upper arm + forearm with an elbow joint
-    const [elbowX, elbowY] = elbowOf(shoulderX, shoulderY, handX, handY, 0.16);
-    limbCapsule(shoulderX, shoulderY, elbowX, elbowY, w * 0.15, skin);
-    limbCapsule(elbowX, elbowY, handX, handY, w * 0.125, skin);
-    jointDot(elbowX, elbowY, w * 0.08, skin);
+    limbCapsule(shoulderX, shoulderY, racketArm.elbowX, racketArm.elbowY, w * 0.15, skin);
+    limbCapsule(racketArm.elbowX, racketArm.elbowY, handX, handY, w * 0.125, skin);
+    jointDot(racketArm.elbowX, racketArm.elbowY, w * 0.08, skin);
     jointDot(handX, handY, w * 0.09, skin);
 
-    // racket
-    const rHeadX = handX + adx * armLen * 0.42;
-    const rHeadY = handY + ady * armLen * 0.42;
+    // racket -- extends as a natural continuation of the forearm (wrist to
+    // string bed), not a separately tracked angle, so it never looks like
+    // it's floating off at an angle unrelated to where the arm actually is.
+    const fdx = handX - racketArm.elbowX, fdy = handY - racketArm.elbowY;
+    const fdist = Math.hypot(fdx, fdy) || 1;
+    const fux = fdx / fdist, fuy = fdy / fdist;
+    const angle = Math.atan2(fuy, fux);
+    const rHeadX = handX + fux * armLen * headExt;
+    const rHeadY = handY + fuy * armLen * headExt;
     ctx.strokeStyle = '#1c1c1c';
     ctx.lineWidth = Math.max(1.5, w * 0.08);
     ctx.beginPath();
