@@ -331,6 +331,7 @@
       this.targetX = this.x;
       this.targetY = this.y;
       this.homeY = COURT.aiMinY + 2.4;
+      this.approaching = false; // committed to rushing the net for this point
     }
 
     setDifficulty(level) {
@@ -356,6 +357,18 @@
     }
 
     _trackBall(ball) {
+      // Committed to the net this point: meet the ball on the way in, near
+      // the net, for a volley -- not where it would eventually bounce deep.
+      if (this.approaching && ball.vy > 0.1) {
+        const interceptY = clamp(COURT.NET_Y + 1.6, COURT.aiMinY, COURT.aiMaxY);
+        const t = (interceptY - ball.y) / ball.vy;
+        if (t > 0) {
+          const ix = ball.x + ball.vx * t;
+          this.targetX = clamp(ix + this._errX, COURT.playerMinX + 0.5, COURT.playerMaxX - 0.5);
+          this.targetY = clamp(interceptY + this._errY, COURT.aiMinY, COURT.aiMaxY);
+          return;
+        }
+      }
       const land = ball.predictLanding();
       this.targetX = clamp(land.x + this._errX, COURT.playerMinX + 0.5, COURT.playerMaxX - 0.5);
       this.targetY = clamp(land.y + 0.9 + this._errY, COURT.aiMinY, COURT.aiMaxY);
@@ -375,7 +388,9 @@
         goalY = this.targetY;
       } else {
         goalX = COURT.W / 2 + (this.x - COURT.W / 2) * 0.3;
-        goalY = this.homeY;
+        // Between shots this point, a net-rush plan means holding position
+        // near the net (in volley range) instead of drifting back home.
+        goalY = this.approaching ? clamp(COURT.NET_Y + 1.8, COURT.aiMinY, COURT.aiMaxY) : this.homeY;
       }
       const dx = goalX - this.x, dy = goalY - this.y;
       const dist = Math.hypot(dx, dy);

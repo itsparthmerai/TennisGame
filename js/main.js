@@ -181,6 +181,7 @@
     G.servePhase = true;
     G.aiReacted = false;
     G.playerReacted = false;
+    G.ai.approaching = false;
     beginServeSetup();
   }
 
@@ -433,6 +434,13 @@
     else if (aimY < 0.3) shotType = 'slice';
     else if (power < 0.22) shotType = 'lob';
     if (Phys.isVolleyRange('ai', ai.y)) shotType = 'volley';
+    // Sometimes commit to following an aggressive shot into the net for the
+    // rest of the point -- real approach shots are flat/sliced drives deep
+    // into the court, almost never a defensive lob. Harder AI does this more.
+    if (!ai.approaching && shotType !== 'volley') {
+      const approachChance = { flat: 0.35, slice: 0.3, topspin: 0.22, lob: 0.03 }[shotType] || 0.15;
+      if (Math.random() < approachChance * diff.aimSpread) ai.approaching = true;
+    }
     const isForehand = (ai.x - (ai.preShotX ?? ai.x)) * ai.facing >= 0;
     ai.triggerSwing(shotType, isForehand);
     power > 0.7 ? RetroAudio.sfx.hitPower() : RetroAudio.sfx.hit();
