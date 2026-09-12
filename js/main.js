@@ -92,11 +92,11 @@
     return Phys.clamp(1 - Math.abs(phase - 0.5) * 2.2, 0, 1);
   }
 
-  // Wimbledon's famous all-whites, with a colored trim so the two players
-  // still read clearly apart at a glance during a fast rally.
+  // Classic whites with a colored trim so the two players still read clearly
+  // apart at a glance during a fast rally; distinct skin tones do the same.
   const KITS = {
-    player: { shirt: '#f6f3e7', shirtShade: '#dcd8c8', trim: '#c23b2b', shorts: '#eeebdd', hair: '#3b2a1a', shoe: '#2a2a2a' },
-    ai: { shirt: '#f2efe3', shirtShade: '#d8d5c5', trim: '#2b5fc2', shorts: '#e9e6d8', hair: '#241a12', shoe: '#232323' },
+    player: { shirt: '#f6f3e7', shirtShade: '#dcd8c8', trim: '#c23b2b', shorts: '#eeebdd', hair: '#3b2a1a', shoe: '#2a2a2a', skin: '#e8b98c' },
+    ai: { shirt: '#f2efe3', shirtShade: '#d8d5c5', trim: '#2b5fc2', shorts: '#e9e6d8', hair: '#241a12', shoe: '#232323', skin: '#a9764f' },
   };
 
   // ---------- Service box geometry ----------
@@ -757,14 +757,42 @@
     };
   }
 
+  function mixColor(hex, amt) {
+    const c = hex.replace('#', '');
+    const num = parseInt(c.length === 3 ? c.split('').map((ch) => ch + ch).join('') : c, 16);
+    const r = Phys.clamp(((num >> 16) & 0xff) + amt, 0, 255);
+    const g = Phys.clamp(((num >> 8) & 0xff) + amt, 0, 255);
+    const b = Phys.clamp((num & 0xff) + amt, 0, 255);
+    return `rgb(${r},${g},${b})`;
+  }
+
+  // Fills a rounded capsule (rather than stroking a round-capped line) so it
+  // can carry a gradient across its short axis -- darker at both edges,
+  // lighter down the middle -- which reads as a cylindrical limb catching
+  // light, instead of a flat color band.
   function limbCapsule(x1, y1, x2, y2, width, color) {
-    ctx.strokeStyle = color;
-    ctx.lineWidth = width;
-    ctx.lineCap = 'round';
+    const dx = x2 - x1, dy = y2 - y1;
+    const len = Math.hypot(dx, dy) || 0.0001;
+    const angle = Math.atan2(dy, dx);
+    const r = width / 2;
+    ctx.save();
+    ctx.translate(x1, y1);
+    ctx.rotate(angle);
     ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(x2, y2);
-    ctx.stroke();
+    ctx.moveTo(0, -r);
+    ctx.lineTo(len, -r);
+    ctx.arc(len, 0, r, -Math.PI / 2, Math.PI / 2);
+    ctx.lineTo(0, r);
+    ctx.arc(0, 0, r, Math.PI / 2, -Math.PI / 2);
+    ctx.closePath();
+    const grad = ctx.createLinearGradient(0, -r, 0, r);
+    const darker = mixColor(color, -38);
+    grad.addColorStop(0, darker);
+    grad.addColorStop(0.5, color);
+    grad.addColorStop(1, darker);
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.restore();
   }
 
   function jointDot(x, y, r, color) {
@@ -792,7 +820,7 @@
     const strideFreq = 9 + speedT * 8 + lateralRatio * 3;
     const strideAmp = h * (0.11 + speedT * 0.11) * (1 - lateralRatio * 0.22);
     const kit = isPlayer ? KITS.player : KITS.ai;
-    const skin = '#e8b98c';
+    const skin = kit.skin;
     const dir = actor.facing; // dominant (racket) shoulder side -- fixed per character
 
     // ---- swing state (computed early -- both legs and arms key off it) ----
@@ -873,6 +901,12 @@
     ctx.fillStyle = kit.shorts;
     ctx.beginPath();
     ctx.ellipse(0, legTop, w * 0.26, h * 0.05, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // a soft contact shadow right under the hip crease, for a touch of depth
+    // where the torso overlaps the legs
+    ctx.fillStyle = 'rgba(0,0,0,0.16)';
+    ctx.beginPath();
+    ctx.ellipse(0, legTop + h * 0.01, w * 0.24, h * 0.025, 0, 0, Math.PI * 2);
     ctx.fill();
 
     // body lean into the direction of travel (subtle, sells the running feel)
@@ -1041,6 +1075,7 @@
     const rHeadY = handY + fuy * armLen * headExt;
     ctx.strokeStyle = '#1c1c1c';
     ctx.lineWidth = Math.max(1.5, w * 0.08);
+    ctx.lineCap = 'round';
     ctx.beginPath();
     ctx.moveTo(handX, handY);
     ctx.lineTo(rHeadX, rHeadY);
@@ -1056,7 +1091,7 @@
     ctx.save();
     ctx.translate(rHeadX, rHeadY);
     ctx.rotate(angle);
-    ctx.strokeStyle = 'rgba(70,65,55,0.55)';
+    ctx.strokeStyle = 'rgba(214,178,64,0.75)';
     ctx.lineWidth = Math.max(0.5, w * 0.016);
     for (let k = -2; k <= 2; k++) {
       const t = (k / 3) * w * 0.28;
